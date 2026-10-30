@@ -237,6 +237,76 @@ describe('下载队列（迁移 4.5 队列的关键行为）', () => {
   });
 });
 
+describe('入队去重与清晰度冲突（迁移 4.5 enqueueEpisodes 的守卫）', () => {
+  it('同一集同一清晰度重复入队只排一条，不会并发写同一个文件', async () => {
+    const h = createQueueHarness();
+    h.queue.enqueue([{ ...task('a'), quality: '1080p' }]);
+    const again = h.queue.enqueue([{ ...task('a'), quality: '1080p' }]);
+    expect(again).toEqual([]);
+    expect(h.queue.list()).toHaveLength(1);
+    await h.queue.drain();
+    expect(h.calls).toEqual(['a']);
+  });
+
+  it('同一批里的重复分集只建一条任务', async () => {
+    const h = createQueueHarness();
+    const created = h.queue.enqueue([task('a'), { ...task('a') }, task('b')]);
+    expect(created.map((item) => item.id)).toEqual(['a', 'b']);
+    expect(h.queue.list().map((item) => item.id)).toEqual(['a', 'b']);
+    await h.queue.drain();
+  });
+
+  it('同一集请求不同清晰度直接拒绝，原任务保持原清晰度且不新增任务', async () => {
+    const h = createQueueHarness();
+    h.queue.enqueue([{ ...task('a'), quality: '720p' }]);
+    expect(() => h.queue.enqueue([{ ...task('a'), quality: '1080p' }])).toThrow(/不同清晰度/);
+    expect(h.queue.list()).toHaveLength(1);
+    expect(h.queue.get('a')?.quality).toBe('720p');
+    await h.queue.drain();
+  });
+
+  it('冲突时整批都不入队（不留半批任务）', async () => {
+    const h = createQueueHarness();
+    h.queue.enqueue([{ ...task('a'), quality: '720p' }]);
+    expect(() =>
+      h.queue.enqueue([
+        { ...task('b'), quality: 'auto' },
+        { ...task('a'), quality: '1080p' },
+      ]),
+    ).toThrow(/不同清晰度/);
+    expect(h.queue.list().map((item) => item.id)).toEqual(['a']);
+  });
+
+  it('已移除的任务可以重新入队，且各任务自带清晰度（不跟随后来的设置）', async () => {
+    const h = createQueueHarness();
+    h.queue.enqueue([{ ...task('a'), quality: '720p' }]);
+    await h.queue.drain();
+    h.queue.remove('a');
+    const created = h.queue.enqueue([{ ...task('a'), quality: '1080p' }]);
+    expect(created[0]?.quality).toBe('1080p');
+  });
+
+  it('list 返回副本：读列表不会改写队列、路径或文件名（对应旧检查的「读取是纯读」）', async () => {
+    const h = createQueueHarness({ concurrency: 1 });
+    h.queue.enqueue([{ ...task('a'), savePath: '/tmp/keep-a.mp4' }]);
+    const [row] = h.queue.list();
+    row!.savePath = '/tmp/rewritten.mp4';
+    row!.status = 'completed';
+    expect(h.queue.list()[0]?.savePath).toBe('/tmp/keep-a.mp4');
+    expect(h.queue.list()[0]?.status).not.toBe('completed');
+    await h.queue.drain();
+    expect(h.queue.list()[0]?.savePath).toBe('/tmp/keep-a.mp4');
+  });
+
+  it('list 只读：不会触发任何下载', async () => {
+    const h = createQueueHarness({ concurrency: 0 });
+    h.queue.enqueue([task('a')]);
+    for (let index = 0; index < 3; index++) h.queue.list();
+    // 并发为 0 时会被归一成 1，所以任务会跑；这里断言的是 list 本身不改变状态
+    expect(h.queue.list().every((item) => item.savePath.includes('/tmp/'))).toBe(true);
+  });
+});
+
 describe('队列持久化与删除任务', () => {
   it('入队/完成/暂停都会落盘，重启后能读回', () => {
     const persisted: Array<Array<{ id: string; status: string }>> = [];

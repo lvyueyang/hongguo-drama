@@ -257,28 +257,52 @@ export function createDownloadQueue(options: DownloadQueueOptions): DownloadQueu
 
   return {
     enqueue(input) {
-      const created = input.map((item) => {
-        const task: QueueTask = {
-          id: item.id ?? `task-${now()}-${tasks.length + 1}`,
-          vid: String(item.vid),
-          seriesId: String(item.seriesId),
-          seriesTitle: item.seriesTitle ?? '',
-          savePath: item.savePath,
-          quality: item.quality,
-          allowLowerQuality: item.allowLowerQuality,
-          status: 'pending',
-          progress: 0,
-          receivedBytes: 0,
-          totalBytes: 0,
-          actualQuality: null,
-          retries: 0,
-          retryAt: null,
-          createdAt: now(),
-          updatedAt: now(),
-        };
-        tasks.push(task);
-        return task;
-      });
+      const qualityOf = (value: unknown): string =>
+        value === undefined || value === null || value === '' ? 'auto' : String(value);
+      // 同一集不重复排队：4.5 的 enqueueEpisodes 就守着这条，重构后丢了——
+      // 重复入队会产生两条同 id 任务，并发写同一个文件，第二条因「目标已存在」失败，
+      // 而 pause/remove/get 只找得到第一条，第二条再也管不住。
+      const planned = input.map((item, index) => ({
+        item,
+        id: item.id ?? `task-${now()}-${tasks.length + index + 1}`,
+      }));
+      for (const { item, id } of planned) {
+        const existing = tasks.find((task) => task.id === id);
+        if (existing && qualityOf(existing.quality) !== qualityOf(item.quality)) {
+          // 不静默换成另一种清晰度：已排队/在跑的那条保持原样，整批请求拒绝。
+          throw Object.assign(new Error('该集已有不同清晰度的下载任务，请先移除原任务后再下载'), {
+            code: 'INPUT_INVALID',
+          });
+        }
+      }
+      const created = planned
+        .filter(({ id }, index) => {
+          // 已存在（且清晰度相同）或同批重复的分集直接跳过。
+          if (tasks.some((task) => task.id === id)) return false;
+          return planned.findIndex((other) => other.id === id) === index;
+        })
+        .map(({ item, id }) => {
+          const task: QueueTask = {
+            id,
+            vid: String(item.vid),
+            seriesId: String(item.seriesId),
+            seriesTitle: item.seriesTitle ?? '',
+            savePath: item.savePath,
+            quality: item.quality,
+            allowLowerQuality: item.allowLowerQuality,
+            status: 'pending',
+            progress: 0,
+            receivedBytes: 0,
+            totalBytes: 0,
+            actualQuality: null,
+            retries: 0,
+            retryAt: null,
+            createdAt: now(),
+            updatedAt: now(),
+          };
+          tasks.push(task);
+          return task;
+        });
       commit();
       pump();
       return created;

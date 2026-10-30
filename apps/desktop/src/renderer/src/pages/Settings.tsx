@@ -2,6 +2,7 @@ import { Events } from '@hongguo/contract';
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input } from '@hongguo/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
+import { CustomSourceManager } from '../components/CustomSourceManager.tsx';
 import { EnhancementControls, useEnhancementSettings } from '../components/VideoEnhancement.tsx';
 import { api } from '../lib/api.ts';
 import ShortcutSettings from './ShortcutSettings.tsx';
@@ -53,9 +54,19 @@ export default function Settings() {
   const deleteAll = useMutation({
     mutationFn: () => api.storageDeleteAll(),
     onSuccess: (result) => {
-      const data = result as { deleted: number; bytes: number; failed: string[] };
+      const data = result as {
+        deleted: number;
+        bytes: number;
+        failed: string[];
+        skipped?: string[];
+        skippedFiles?: number;
+      };
+      // 正在合并的剧集会被跳过（删源文件会让合并中途失败），必须如实告诉用户。
+      const skipped = data.skipped?.length
+        ? `；${data.skipped.length} 部剧正在合并已跳过${data.skippedFiles ? `（${data.skippedFiles} 个文件）` : ''}`
+        : '';
       setStorageNotice(
-        `已删除 ${data.deleted} 个文件（${formatBytes(data.bytes)}）${data.failed.length ? `，${data.failed.length} 个删除失败` : ''}`,
+        `已删除 ${data.deleted} 个文件（${formatBytes(data.bytes)}）${data.failed.length ? `，${data.failed.length} 个删除失败` : ''}${skipped}`,
       );
       void client.invalidateQueries({ queryKey: ['storageUsage'] });
       void client.invalidateQueries({ queryKey: ['downloads'] });
@@ -182,6 +193,8 @@ export default function Settings() {
         update={enhancement.update}
         saveError={enhancement.saveError}
       />
+
+      <CustomSourceManager />
 
       <Card>
         <CardHeader>

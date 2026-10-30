@@ -57,6 +57,17 @@ describe('CSP', () => {
   });
 });
 
+describe('权限处理接线', () => {
+  it('请求与同步检查两条路径都注册，并交给权限策略判断', () => {
+    expect(mainSource).toContain('setPermissionRequestHandler');
+    expect(mainSource).toContain('setPermissionCheckHandler');
+    expect(mainSource).toContain('isTrustedPermissionRequest');
+    // 信任判定必须同时压窗口身份与 frame/地址，不能只看权限名
+    expect(mainSource).toContain('mainWindow.webContents');
+    expect(mainSource).toMatch(/trusted:\s*permissionTrusted/);
+  });
+});
+
 describe('preload 暴露面', () => {
   it('通过 contextBridge 暴露契约化 API，不泄漏 ipcRenderer 或 Node 能力', () => {
     expect(preloadSource).toContain('contextBridge.exposeInMainWorld');

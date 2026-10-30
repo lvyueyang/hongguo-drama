@@ -105,6 +105,40 @@ export const downloadEnqueueRequestSchema = z
 
 export type DownloadEnqueueRequest = z.infer<typeof downloadEnqueueRequestSchema>;
 
+/* ===== 自定义源管理 ===== */
+
+export const customSourceDraftSchema = z.object({
+  /** 新增时没有编号；更新时必须给出，否则会新建一个来源 */
+  id: z.string().max(64).optional(),
+  name: z.string().min(1).max(80),
+  url: z.string().min(1).max(4096),
+  enabled: z.boolean().optional(),
+});
+
+export const customSourceSaveRequestSchema = z.object({
+  source: customSourceDraftSchema,
+  /** true = 删除这个来源 */
+  remove: z.boolean().default(false),
+  /** true = 保存前先真连一次接口 */
+  test: z.boolean().default(false),
+});
+export type CustomSourceSaveRequest = z.infer<typeof customSourceSaveRequestSchema>;
+
+export const customSourceViewSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  url: z.string(),
+  enabled: z.boolean(),
+});
+export type CustomSourceView = z.infer<typeof customSourceViewSchema>;
+
+export const customSourceSaveResponseSchema = z.object({
+  success: z.boolean(),
+  error: z.string().optional(),
+  sources: z.array(customSourceViewSchema),
+});
+export type CustomSourceSaveResponse = z.infer<typeof customSourceSaveResponseSchema>;
+
 export const danmakuRequestSchema = z.object({
   vid: z.string().min(1).max(64),
   seriesId: z.string().min(1).max(64),
@@ -146,7 +180,15 @@ export const playPrepareRequestSchema = z.object({
   vid: z.string().min(1).max(64),
   seriesId: z.string().max(30).optional(),
   quality: z.enum(['auto', '1080p', '720p']).default('auto'),
+  /**
+   * 强制重新取源（忽略缓存）。用户手动「重试」时必须带它：
+   * 不然会把上一次失败的缓存结果原样再拿一遍。
+   */
+  force: z.boolean().default(false),
 });
+
+export const playCancelRequestSchema = z.object({ sessionId: z.string().min(1).max(128) });
+export type PlayCancelRequest = z.infer<typeof playCancelRequestSchema>;
 
 export type PlayPrepareRequest = z.infer<typeof playPrepareRequestSchema>;
 
@@ -170,6 +212,14 @@ export const rankingsRequestSchema = z.object({
 export const historyListRequestSchema = z.object({
   scope: z.enum(['all', 'latest', 'unfinished', 'skip-completed-low']).default('all'),
 });
+export const historyRefreshRequestSchema = z.object({
+  /** 只重检这一部剧（单行重检；忽略 24 小时检查点） */
+  seriesId: seriesIdSchema.optional(),
+});
+export type HistoryRefreshRequest = z.infer<typeof historyRefreshRequestSchema>;
+
+export const historyRemoveRequestSchema = z.object({ seriesId: seriesIdSchema });
+export type HistoryRemoveRequest = z.infer<typeof historyRemoveRequestSchema>;
 export const accountHistoryRequestSchema = z.object({ refresh: z.boolean().default(false) });
 export const accountPollRequestSchema = z.object({ loginId: z.string().min(1).max(200) });
 
@@ -244,6 +294,11 @@ export const progressSaveRequestSchema = z.object({
   currentTime: z.number().min(0).max(86400),
   duration: z.number().min(0).max(86400).default(0),
   watched: z.boolean().default(false),
+  /**
+   * 这一集是不是播到结尾了。
+   * 只看 `watched` 分不出「暂停」与「播完」，而「已看完的低季不再提示」必须靠播完的证据。
+   */
+  ended: z.boolean().default(false),
 });
 export const progressSchema = z
   .object({
@@ -265,6 +320,11 @@ export type ProgressDto = z.infer<typeof progressSchema>;
 export const mergeStartRequestSchema = z.object({
   seriesId: z.string().min(1).max(64),
   compatible: z.boolean().default(false),
+  /**
+   * 只合并达到 1080P 的分集（4.5 的 require1080）：任一集达不到就拒绝，
+   * 而不是悄悄把 720P 的集混进「合集」里。
+   */
+  require1080: z.boolean().default(false),
 });
 
 export type MergeStartRequest = z.infer<typeof mergeStartRequestSchema>;
@@ -332,6 +392,7 @@ export interface RendererApi {
   searchWeb(request: SearchRequest): Promise<IpcResult<unknown>>;
   browseSources(): Promise<IpcResult<BrowseSourceDto[]>>;
   browseList(request: BrowseRequest): Promise<IpcResult<unknown>>;
+  customSourceSave(request: CustomSourceSaveRequest): Promise<IpcResult<CustomSourceSaveResponse>>;
   getSettings(): Promise<IpcResult<SettingsDto>>;
   saveSettings(settings: SettingsDto): Promise<IpcResult<SettingsDto>>;
   downloadEnqueue(request: DownloadEnqueueRequest): Promise<IpcResult<unknown>>;
@@ -340,6 +401,8 @@ export interface RendererApi {
   downloadResume(id: string): Promise<IpcResult<unknown>>;
   downloadRemove(id: string): Promise<IpcResult<unknown>>;
   playPrepare(request: PlayPrepareRequest): Promise<IpcResult<PlayPrepareResponse>>;
+  /** 取消一次播放会话（释放上游连接与临时文件） */
+  playCancel(request: PlayCancelRequest): Promise<IpcResult<{ released: boolean }>>;
   mergeStart(request: MergeStartRequest): Promise<IpcResult<MergeStartResponse>>;
   mergeCancel(seriesId: string): Promise<IpcResult<unknown>>;
   transcode(request: TranscodeRequest): Promise<IpcResult<TranscodeResponse>>;
@@ -349,6 +412,7 @@ export interface RendererApi {
   seriesEpisodes(seriesId: string): Promise<IpcResult<unknown>>;
   seriesSequels(seriesId: string): Promise<IpcResult<unknown>>;
   historyList(request: HistoryListRequest): Promise<IpcResult<unknown>>;
+  historyRemove(request: HistoryRemoveRequest): Promise<IpcResult<{ removed: boolean }>>;
   rankings(request: RankingsRequest): Promise<IpcResult<unknown>>;
   accountStatus(): Promise<IpcResult<unknown>>;
   accountStartLogin(): Promise<IpcResult<unknown>>;
@@ -375,7 +439,7 @@ export interface RendererApi {
   proxyApply(): Promise<IpcResult<unknown>>;
   proxyTest(draft: Record<string, unknown>): Promise<IpcResult<unknown>>;
   danmakuList(request: DanmakuRequest): Promise<IpcResult<DanmakuResponse>>;
-  historyRefresh(): Promise<IpcResult<{ checked: number; failed: number }>>;
+  historyRefresh(request?: HistoryRefreshRequest): Promise<IpcResult<{ checked: number; failed: number }>>;
   playPrefetch(
     request: PrefetchRequest,
   ): Promise<IpcResult<{ target: string; status: string; error?: string }>>;

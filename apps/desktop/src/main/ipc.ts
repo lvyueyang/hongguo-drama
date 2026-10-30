@@ -13,6 +13,8 @@ import {
   type BrowseRequest,
   browseRequestSchema,
   Channels,
+  type CustomSourceSaveRequest,
+  customSourceSaveRequestSchema,
   type DanmakuRequest,
   type DownloadEnqueueRequest,
   danmakuRequestSchema,
@@ -22,17 +24,22 @@ import {
   type ExportTextRequest,
   exportTextRequestSchema,
   floatOpenRequestSchema,
+  type HistoryRemoveRequest,
   historyListRequestSchema,
+  historyRefreshRequestSchema,
+  historyRemoveRequestSchema,
   type IpcResult,
   ipcFail,
   ipcOk,
   libraryAddRequestSchema,
   type MergeStartRequest,
   mergeStartRequestSchema,
+  type PlayCancelRequest,
   type PlayPrepareRequest,
   type PrefetchRequest,
   type ProgressGetRequest,
   type ProgressSaveRequest,
+  playCancelRequestSchema,
   playPrepareRequestSchema,
   prefetchRequestSchema,
   progressGetRequestSchema,
@@ -51,7 +58,12 @@ export interface IpcSdkPort {
   capabilities(): unknown;
   suggest(keyword: string, options?: { limit?: number }): Promise<unknown>;
   search: { web(keyword: string, options?: unknown): Promise<unknown> };
-  catalog: { sources(): unknown; app(options?: Record<string, unknown>): Promise<unknown> };
+  catalog: {
+    sources(): unknown;
+    app(options?: Record<string, unknown>): Promise<unknown>;
+    /** 自定义源的增删改（校验 → 可选真连 → 落盘） */
+    saveCustomSource(request: CustomSourceSaveRequest): Promise<unknown>;
+  };
   storage: { getSettings(): Record<string, unknown>; saveSettings(settings: Record<string, unknown>): void };
   danmaku: { fetch(options?: unknown): Promise<unknown> };
 }
@@ -70,6 +82,8 @@ export interface IpcDownloadPort {
 
 export interface IpcPlaybackPort {
   prepare(request: PlayPrepareRequest): Promise<{ url: string; sessionId: string }>;
+  /** 释放会话（取消取源/释放临时文件） */
+  cancel(sessionId: string): { released: boolean };
 }
 
 export interface IpcMergePort {
@@ -94,6 +108,7 @@ export interface IpcSeriesPort {
 }
 
 export interface IpcHistoryPort {
+  remove(seriesId: string): { removed: boolean };
   list(scope: string): unknown;
 }
 
@@ -147,7 +162,7 @@ export interface IpcProxyPort {
 }
 
 export interface IpcHistoryRefreshPort2 {
-  refresh(): Promise<{ checked: number; failed: number }>;
+  refresh(seriesId?: string): Promise<{ checked: number; failed: number }>;
 }
 
 export interface IpcPrefetchPort {
@@ -271,19 +286,29 @@ export function registerIpcHandlers({
   handle(
     Channels.searchWeb,
     (raw) => searchRequestSchema.parse(raw),
-    (input) => sdk.search.web(input.keyword, { page: input.page ?? 1 }),
+    // 走 search 端口而不是直连 sdk.search.web：渲染层选了来源就必须真的按来源搜，
+    // 否则选河马/西饭/自定义仍然在搜红果官网（并且 20s 总预算也没人管）。
+    (input) => search.query({ keyword: input.keyword, page: input.page ?? 1, source: input.source }),
   );
   handle(Channels.browseSources, noInput, () => sdk.catalog.sources());
   handle(
+    Channels.customSourceSave,
+    (raw) => customSourceSaveRequestSchema.parse(raw),
+    (input: CustomSourceSaveRequest) => sdk.catalog.saveCustomSource(input),
+  );
+  handle(
     Channels.browseList,
     (raw) => browseRequestSchema.parse(raw),
+    // 同理走 catalog 端口：source 与线路（app/web）都要透传，
+    // 端口还按代理模式决定能不能用可信 DNS 直连。
     (input: BrowseRequest) =>
-      sdk.catalog.app({
+      catalog.list({
         source: input.source,
         category: input.category,
         genre: input.genre,
         page: input.page ?? 1,
         cursor: input.cursor ?? null,
+        catalogChannel: input.catalogChannel,
       }),
   );
   handle(Channels.settingsGet, noInput, () => sdk.storage.getSettings());
@@ -331,6 +356,11 @@ export function registerIpcHandlers({
     (raw) => playPrepareRequestSchema.parse(raw),
     (input) => playback.prepare(input),
   );
+  handle(
+    Channels.playCancel,
+    (raw) => playCancelRequestSchema.parse(raw),
+    (input: PlayCancelRequest) => playback.cancel(input.sessionId),
+  );
 
   handle(
     Channels.mergeStart,
@@ -372,6 +402,11 @@ export function registerIpcHandlers({
     Channels.seriesSequels,
     (raw) => seriesIdSchema.parse(raw),
     (seriesId) => series.sequels(seriesId),
+  );
+  handle(
+    Channels.historyRemove,
+    (raw) => historyRemoveRequestSchema.parse(raw),
+    (input: HistoryRemoveRequest) => history.remove(input.seriesId),
   );
   handle(
     Channels.historyList,
@@ -445,7 +480,12 @@ export function registerIpcHandlers({
     (raw) => floatOpenRequestSchema.parse(raw),
     (input) => floating.open(input),
   );
-  handle(Channels.historyRefresh, noInput, () => historyRefresh.refresh());
+  // 单行重检：带 seriesId 时只查那一部（忽略 24 小时检查点）
+  handle(
+    Channels.historyRefresh,
+    (raw) => historyRefreshRequestSchema.parse(raw ?? {}),
+    (input) => historyRefresh.refresh(input?.seriesId),
+  );
   handle(
     Channels.danmakuList,
     (raw) => danmakuRequestSchema.parse(raw),

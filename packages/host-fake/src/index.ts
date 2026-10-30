@@ -99,6 +99,10 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
   return {
     logs,
     opened,
+    // 外部链接：记录到 openExternal 的调用日志，方便断言「交给系统浏览器」
+    openExternal: async (url: string) => {
+      opened.push(url);
+    },
     app: () => ({
       name: 'hongguo-drama',
       version: '5.0.0-test',

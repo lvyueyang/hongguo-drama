@@ -20,6 +20,7 @@ function createHarness(overrides: Partial<IpcSdkPort> = {}) {
     search: { web: vi.fn(async () => ({ results: [{ series_id: '1' }] })) },
     catalog: {
       sources: () => [{ id: 'hongguo', label: '红果', enabled: true }],
+      saveCustomSource: vi.fn(async () => ({ success: true, sources: [] })),
       app: vi.fn(async () => ({ results: [] })),
     },
     storage: {
@@ -29,7 +30,8 @@ function createHarness(overrides: Partial<IpcSdkPort> = {}) {
     ...overrides,
   };
 
-  registerIpcHandlers({
+  // 显式标注参数类型，保住对象字面量的上下文类型（否则端口回调全是隐式 any）。
+  const deps: Parameters<typeof registerIpcHandlers>[0] = {
     catalog: { list: vi.fn(async () => ({ success: true, results: [] })) },
     search: { query: vi.fn(async () => ({ success: true, results: [] })) },
     floating,
@@ -51,7 +53,10 @@ function createHarness(overrides: Partial<IpcSdkPort> = {}) {
       resume: (id: string) => ({ id, status: 'pending' }),
       remove: () => true,
     },
-    playback: { prepare: vi.fn(async () => ({ url: 'hongguo-stream://play/x', sessionId: 'x' })) },
+    playback: {
+      prepare: vi.fn(async () => ({ url: 'hongguo-stream://play/x', sessionId: 'x' })),
+      cancel: vi.fn(() => ({ released: true })),
+    },
     merge: {
       start: vi.fn(async () => ({ seriesId: '1', outputPath: '/tmp/x.mp4', count: 2 })),
       cancel: vi.fn(() => ({ cancelled: true })),
@@ -67,7 +72,7 @@ function createHarness(overrides: Partial<IpcSdkPort> = {}) {
       episodes: vi.fn(async () => ({ series_id: '1', episodes: [] })),
       sequels: vi.fn(async () => ({ results: [] })),
     },
-    history: { list: () => [] },
+    history: { list: () => [], remove: vi.fn(() => ({ removed: true })) },
     rankings: { list: vi.fn(async () => ({ results: [] })) },
     proxy: {
       apply: vi.fn(() => ({ mode: 'direct' })),
@@ -126,11 +131,13 @@ function createHarness(overrides: Partial<IpcSdkPort> = {}) {
       history: vi.fn(async () => ({ success: true, results: [] })),
     },
     logger: { warn: (message) => warnings.push(message) },
-  });
+  };
+  registerIpcHandlers(deps);
 
   return {
     handlers,
     sdk,
+    deps,
     warnings,
     floating,
     prefetch,
@@ -179,16 +186,20 @@ describe('主进程 IPC 装配层（替代旧 vm + 假 Electron 的做法）', (
     expect(warnings[0]).toContain('search:suggest');
   });
 
-  it('目录翻页默认第 1 页，游标缺省为 null', async () => {
-    const { sdk, call } = createHarness();
+  it('目录翻页默认第 1 页，游标缺省为 null；线路缺省交给端口按来源决定', async () => {
+    const { deps, call } = createHarness();
     await call(Channels.browseList, { source: 'hongguo', category: 'real-drama' });
 
-    expect(sdk.catalog.app).toHaveBeenCalledWith({
+    const list = (deps.catalog as { list: ReturnType<typeof vi.fn> }).list as unknown as ReturnType<
+      typeof vi.fn
+    >;
+    expect(list).toHaveBeenCalledWith({
       source: 'hongguo',
       category: 'real-drama',
       genre: undefined,
       page: 1,
       cursor: null,
+      catalogChannel: undefined,
     });
   });
 
@@ -203,11 +214,20 @@ describe('主进程 IPC 装配层（替代旧 vm + 假 Electron 的做法）', (
     expect(result).toEqual({ ok: true, data: { root: '/new' } });
   });
 
-  it('下载入队走契约校验，vids 为空直接拒绝', async () => {
+  it('下载入队走契约校验，vids 为空或清晰度非法都直接拒绝', async () => {
     const { call, sdk } = createHarness();
     const bad = (await call(Channels.downloadEnqueue, { seriesId: '1', vids: [] })) as IpcResult<unknown>;
     expect(bad.ok).toBe(false);
     if (!bad.ok) expect(bad.error.code).toBe('INPUT_INVALID');
+
+    // 4k 这类不在枚举里的值必须在入队前就被挡住（不能先建任务再报错）
+    const invalidQuality = (await call(Channels.downloadEnqueue, {
+      seriesId: '1',
+      vids: ['9'],
+      quality: '4k',
+    })) as IpcResult<unknown>;
+    expect(invalidQuality.ok).toBe(false);
+    if (!invalidQuality.ok) expect(invalidQuality.error.code).toBe('INPUT_INVALID');
 
     const good = (await call(Channels.downloadEnqueue, {
       seriesId: '1',
@@ -386,6 +406,117 @@ describe('主进程 IPC 装配层（替代旧 vm + 假 Electron 的做法）', (
     }>;
     expect(good.ok).toBe(true);
     if (good.ok) expect(good.data.deleted).toBe(1);
+  });
+
+  it('搜索按来源分流：source 原样交给端口，缺省时由端口决定默认来源', async () => {
+    const { call, deps } = createHarness();
+    const query = (deps.search as { query: ReturnType<typeof vi.fn> }).query as unknown as ReturnType<
+      typeof vi.fn
+    >;
+
+    const hema = (await call(Channels.searchWeb, {
+      keyword: '剧名',
+      source: 'hema',
+      page: 2,
+    })) as IpcResult<unknown>;
+    expect(hema.ok).toBe(true);
+    expect(query).toHaveBeenLastCalledWith({ keyword: '剧名', page: 2, source: 'hema' });
+
+    const plain = (await call(Channels.searchWeb, { keyword: '剧名' })) as IpcResult<unknown>;
+    expect(plain.ok).toBe(true);
+    expect(query).toHaveBeenLastCalledWith({ keyword: '剧名', page: 1, source: undefined });
+
+    // 非法来源长度在契约层就被拒，端口不会被调
+    const bad = (await call(Channels.searchWeb, {
+      keyword: '剧名',
+      source: 'x'.repeat(65),
+    })) as IpcResult<unknown>;
+    expect(bad.ok).toBe(false);
+  });
+
+  it('目录按来源与线路分流：source / catalogChannel / cursor 都交给端口', async () => {
+    const { call, deps } = createHarness();
+    const list = (deps.catalog as { list: ReturnType<typeof vi.fn> }).list as unknown as ReturnType<
+      typeof vi.fn
+    >;
+
+    const web = (await call(Channels.browseList, {
+      source: 'hongguo',
+      category: 'real-drama',
+      catalogChannel: 'web',
+      page: 2,
+    })) as IpcResult<unknown>;
+    expect(web.ok).toBe(true);
+    expect(list).toHaveBeenLastCalledWith({
+      source: 'hongguo',
+      category: 'real-drama',
+      genre: undefined,
+      page: 2,
+      cursor: null,
+      catalogChannel: 'web',
+    });
+
+    const hema = (await call(Channels.browseList, {
+      source: 'hema',
+      cursor: 'abc',
+      catalogChannel: 'app',
+    })) as IpcResult<unknown>;
+    expect(hema.ok).toBe(true);
+    expect(list).toHaveBeenLastCalledWith({
+      source: 'hema',
+      category: undefined,
+      genre: undefined,
+      page: 1,
+      cursor: 'abc',
+      catalogChannel: 'app',
+    });
+  });
+
+  it('自定义源保存：入参过契约校验，校验失败不触达端口', async () => {
+    const { call, sdk } = createHarness();
+    const save = sdk.catalog.saveCustomSource as unknown as ReturnType<typeof vi.fn>;
+
+    const bad = (await call(Channels.customSourceSave, {
+      source: { name: '', url: 'https://a.example' },
+    })) as IpcResult<unknown>;
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.error.code).toBe('INPUT_INVALID');
+    expect(save).not.toHaveBeenCalled();
+
+    const ok = (await call(Channels.customSourceSave, {
+      source: { name: '夹具源', url: 'https://a.example/api' },
+      test: true,
+    })) as IpcResult<{ success: boolean }>;
+    expect(ok.ok).toBe(true);
+    // 缺省的 remove / test 由契约补成 false / true
+    expect(save).toHaveBeenCalledWith({
+      source: { name: '夹具源', url: 'https://a.example/api' },
+      remove: false,
+      test: true,
+    });
+  });
+
+  it('合并请求把兼容模式与「仅 1080P」原样交给端口（默认都是 false）', async () => {
+    const { call, deps } = createHarness();
+    const start = deps.merge.start as unknown as ReturnType<typeof vi.fn>;
+
+    const plain = (await call(Channels.mergeStart, { seriesId: '1' })) as IpcResult<unknown>;
+    expect(plain.ok).toBe(true);
+    expect(start).toHaveBeenLastCalledWith({ seriesId: '1', compatible: false, require1080: false });
+
+    const compatible = (await call(Channels.mergeStart, {
+      seriesId: '1',
+      compatible: true,
+    })) as IpcResult<unknown>;
+    expect(compatible.ok).toBe(true);
+    expect(start).toHaveBeenLastCalledWith({ seriesId: '1', compatible: true, require1080: false });
+
+    const only1080 = (await call(Channels.mergeStart, {
+      seriesId: '1',
+      require1080: true,
+    })) as IpcResult<unknown>;
+    expect(only1080.ok).toBe(true);
+    expect(start).toHaveBeenLastCalledWith({ seriesId: '1', compatible: false, require1080: true });
   });
 
   it('删除单集文件需要任务编号；清空剧集档案返回移除数', async () => {

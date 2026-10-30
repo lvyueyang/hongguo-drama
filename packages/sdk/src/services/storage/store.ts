@@ -77,6 +77,8 @@ const WRITE_ERROR_MESSAGE = '保存失败，请检查磁盘空间或目录权限
 
 export interface Store {
   init(filePath: string): void;
+  /** 上次读盘失败的原因（null = 正常）。启动时据此提示用户，而不是静默带病运行。 */
+  readError(): Error | null;
   setErrorHandler(handler: ((payload: StoreErrorPayload | null) => void) | null): void;
   getSettings(): Settings;
   saveSettings(settings: Partial<Settings>): void;
@@ -189,6 +191,9 @@ export function createStore(): Store {
   }
 
   return {
+    readError() {
+      return readError;
+    },
     init(filePath) {
       dataFile = filePath;
       cache = null;

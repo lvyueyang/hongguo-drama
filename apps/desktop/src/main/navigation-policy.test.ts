@@ -2,15 +2,33 @@
  * 导航与权限策略（补 4.5 `check-renderer-security.cjs` 的导航/权限部分）。
  * 这些是安全边界：外部跳转不能接管应用窗口，敏感权限一律不授权。
  */
-import { describe, expect, it, vi } from 'vitest';
-import { decideNavigation, decidePermission, isAppUrl } from './navigation-policy.ts';
+import { describe, expect, it } from 'vitest';
+import {
+  decideNavigation,
+  decidePermission,
+  isAppUrl,
+  isTrustedPermissionRequest,
+  TRUSTED_PERMISSIONS,
+} from './navigation-policy.ts';
 
-const context = { appOrigins: ['http://localhost:5173'] };
+const ENTRY = 'file:///Applications/app/out/renderer/index.html';
+const context = {
+  appOrigins: ['http://localhost:5173'],
+  appFiles: ['/Applications/app/out/renderer/index.html'],
+};
 
 describe('isAppUrl', () => {
-  it('开发服务器与打包后的 file 页面算应用自身', () => {
+  it('开发服务器与名单内的渲染入口算应用自身', () => {
     expect(isAppUrl('http://localhost:5173/index.html', context)).toBe(true);
-    expect(isAppUrl('file:///Applications/app/out/renderer/index.html', context)).toBe(true);
+    expect(isAppUrl(ENTRY, context)).toBe(true);
+    expect(isAppUrl(`${ENTRY}#/settings`, context)).toBe(true);
+  });
+
+  it('其它本地文件不算应用自身（用户下载的 HTML、挂载的网盘页面都不算）', () => {
+    expect(isAppUrl('file:///tmp/hostile.html', context)).toBe(false);
+    expect(isAppUrl('file:///Applications/app/out/renderer/evil.html', context)).toBe(false);
+    // 没有名单时一个 file: 都不放行
+    expect(isAppUrl(ENTRY, { appOrigins: ['http://localhost:5173'] })).toBe(false);
   });
 
   it('外部站点不算', () => {
@@ -53,29 +71,69 @@ describe('decideNavigation', () => {
 });
 
 describe('decidePermission', () => {
-  it('摄像头/麦克风/定位/通知一律不授权', () => {
+  it('可信主 frame 只用得到全屏与剪贴板（对应 4.5 的权限白名单）', () => {
+    for (const permission of ['fullscreen', 'clipboard-read', 'clipboard-sanitized-write']) {
+      expect(decidePermission(permission, { trusted: true }), permission).toBe(true);
+    }
+  });
+
+  it('摄像头/麦克风/定位/通知/未知权限即使可信也不授权', () => {
     for (const permission of [
       'media',
+      'display-capture',
       'geolocation',
       'notifications',
       'midi',
-      'clipboard-read',
       'openExternal',
+      'unknown',
     ]) {
+      expect(decidePermission(permission, { trusted: true }), permission).toBe(false);
+    }
+  });
+
+  it('不可信来源一律拒绝（默认参数也是拒绝），包括白名单里的权限', () => {
+    for (const permission of ['fullscreen', 'clipboard-read', 'clipboard-sanitized-write', 'media']) {
       expect(decidePermission(permission), permission).toBe(false);
+      expect(decidePermission(permission, { trusted: false }), permission).toBe(false);
     }
   });
 });
 
+describe('isTrustedPermissionRequest', () => {
+  it('应用自己的主 frame 才算可信', () => {
+    expect(isTrustedPermissionRequest({ isMainFrame: true, requestingUrl: ENTRY }, context)).toBe(true);
+    expect(
+      isTrustedPermissionRequest({ isMainFrame: true, requestingUrl: 'http://localhost:5173/' }, context),
+    ).toBe(true);
+  });
+
+  it('子 frame / 外部地址 / 缺失详情都不算可信', () => {
+    expect(
+      isTrustedPermissionRequest(
+        { isMainFrame: false, requestingUrl: 'file:///app/out/renderer/index.html' },
+        context,
+      ),
+    ).toBe(false);
+    expect(
+      isTrustedPermissionRequest({ isMainFrame: true, requestingUrl: 'https://hongguoduanju.com/' }, context),
+    ).toBe(false);
+    expect(isTrustedPermissionRequest({ isMainFrame: true }, context)).toBe(false);
+    expect(isTrustedPermissionRequest(undefined, context)).toBe(false);
+    expect(isTrustedPermissionRequest(null, context)).toBe(false);
+  });
+});
+
 describe('主进程接线（源码断言）', () => {
-  it('窗口注册了导航守卫与权限处理，且策略来自本模块', async () => {
+  it('窗口注册了导航守卫与两条权限处理，且策略来自本模块', async () => {
     const fs = await import('node:fs');
     const path = await import('node:path');
     const source = fs.readFileSync(path.resolve(process.cwd(), 'apps/desktop/src/main/index.ts'), 'utf8');
     expect(source).toContain('will-navigate');
     expect(source).toContain('setPermissionRequestHandler');
+    // 请求与同步检查两条路径都必须设，否会出现「请求允许但检查被拒」的不一致
+    expect(source).toContain('setPermissionCheckHandler');
+    expect(source).toContain('isTrustedPermissionRequest');
     expect(source).toContain('decideNavigation');
     expect(source).toContain('decidePermission');
-    void vi;
   });
 });

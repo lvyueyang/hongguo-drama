@@ -1,5 +1,7 @@
 import type {
   BrowseRequest,
+  CustomSourceSaveRequest,
+  CustomSourceSaveResponse,
   DownloadEnqueueRequest,
   ExportTextRequest,
   HistoryListRequest,
@@ -50,8 +52,12 @@ export const api = {
   downloadRemove: (id: string) => unwrap(window.api.downloadRemove(id)),
   downloadEnqueue: (request: DownloadEnqueueRequest) => unwrap(window.api.downloadEnqueue(request)),
 
-  playPrepare: (request: PlayPrepareRequest): Promise<PlayPrepareResponse> =>
-    unwrap(window.api.playPrepare(request)),
+  playPrepare: (
+    request: Omit<PlayPrepareRequest, 'force'> & { force?: boolean },
+  ): Promise<PlayPrepareResponse> => unwrap(window.api.playPrepare({ force: false, ...request })),
+  playCancel: (sessionId: string) => unwrap(window.api.playCancel({ sessionId })),
+  customSourceSave: (request: CustomSourceSaveRequest): Promise<CustomSourceSaveResponse> =>
+    unwrap(window.api.customSourceSave(request)),
   mergeStart: (request: MergeStartRequest) => unwrap(window.api.mergeStart(request)),
   mergeCancel: (seriesId: string) => unwrap(window.api.mergeCancel(seriesId)),
   transcode: (request: TranscodeRequest): Promise<TranscodeResponse> => unwrap(window.api.transcode(request)),
@@ -67,7 +73,7 @@ export const api = {
   storageUsage: () => unwrap(window.api.storageUsage()),
   proxyApply: () => unwrap(window.api.proxyApply()),
   proxyTest: (draft: Record<string, unknown>) => unwrap(window.api.proxyTest(draft)),
-  historyRefresh: () => unwrap(window.api.historyRefresh()),
+  historyRefresh: (seriesId?: string) => unwrap(window.api.historyRefresh(seriesId ? { seriesId } : {})),
   prefetch: (seriesId: string, currentVid: string, episodes: Array<{ vid: string; locked?: boolean }>) =>
     unwrap(window.api.playPrefetch({ seriesId, currentVid, episodes })),
   danmaku: (vid: string, seriesId: string, fresh = false) =>
@@ -83,6 +89,8 @@ export const api = {
   updateCancel: () => unwrap(window.api.updateCancel()),
   announcementDismiss: (mode: 'day' | 'version') => unwrap(window.api.announcementDismiss({ mode })),
   exportText: (request: ExportTextRequest) => unwrap(window.api.exportText(request)),
+  historyRemove: (seriesId: string): Promise<{ removed: boolean }> =>
+    unwrap(window.api.historyRemove({ seriesId })),
   progressSave: (request: {
     seriesId: string;
     vid: string;
@@ -90,7 +98,9 @@ export const api = {
     currentTime: number;
     duration: number;
     watched: boolean;
-  }) => unwrap(window.api.progressSave(request)),
+    /** 播到结尾了（完成证据；暂停不算） */
+    ended?: boolean;
+  }) => unwrap(window.api.progressSave({ ended: false, ...request })),
 };
 
 export type { ProgressDto, SuggestItemDto };

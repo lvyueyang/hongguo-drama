@@ -4,7 +4,15 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import type { AppInfo, Clock, FileSystem, HostServices, Logger, SecretStore } from '@hongguo/host';
+import {
+  type AppInfo,
+  type Clock,
+  type FileSystem,
+  type HostServices,
+  type Logger,
+  resolveToolPath,
+  type SecretStore,
+} from '@hongguo/host';
 import { app, net, safeStorage, shell } from 'electron';
 
 const fileSystem: FileSystem = {
@@ -94,29 +102,28 @@ export function createElectronHost(): HostServices {
     secretStore: () => createSecretStore(secretPath),
     netTransport: () => net,
     ffmpeg: () => {
-      const executable = (name: string): string => (process.platform === 'win32' ? `${name}.exe` : name);
-      const candidates = (name: string): string[] => {
-        const exe = executable(name);
-        return [
-          app.isPackaged ? path.join(process.resourcesPath, 'bin', exe) : '',
-          path.join(process.cwd(), 'build', 'ffmpeg', `${process.platform}-${process.arch}`, exe),
-          path.join(process.cwd(), '..', '..', 'build', 'ffmpeg', `${process.platform}-${process.arch}`, exe),
-        ].filter(Boolean);
-      };
-      const find = (name: string): string | null => {
-        for (const candidate of candidates(name)) {
-          try {
-            fs.accessSync(candidate, process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK);
-            return candidate;
-          } catch {
-            /* 继续找下一个 */
-          }
-        }
-        return null;
-      };
+      // 路径发现逻辑在 @hongguo/host 的纯函数里（打包后只认随包二进制），这里只提供环境。
+      const find = (name: string): string | null =>
+        resolveToolPath({
+          name,
+          platform: process.platform as 'darwin' | 'win32' | 'linux',
+          arch: process.arch,
+          isPackaged: app.isPackaged,
+          resourcesPath: process.resourcesPath ?? null,
+          cwd: process.cwd(),
+          path: process.env.PATH ?? '',
+          exists: (file) => {
+            try {
+              fs.accessSync(file, process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK);
+              return true;
+            } catch {
+              return false;
+            }
+          },
+        }).path;
       return { ffmpeg: () => find('ffmpeg'), ffprobe: () => find('ffprobe'), supportsHttp: false };
     },
     windows: undefined,
     openExternal: (url: string) => shell.openExternal(url),
-  } as HostServices & { openExternal(url: string): Promise<void> };
+  } as HostServices;
 }

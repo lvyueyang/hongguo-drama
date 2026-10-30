@@ -24,6 +24,9 @@ export interface RefreshRecord {
   lastSequelCheckAt?: number;
   sequels?: Array<{ series_id: string; series_title: string }>;
   lastCheckError?: string;
+  /** 分集与续作分开记原因：用户/界面需要知道是哪一类检查没完成 */
+  lastEpisodeCheckError?: string;
+  lastSequelCheckError?: string;
   [key: string]: unknown;
 }
 
@@ -49,6 +52,8 @@ export interface RefreshDeps {
   intervalMs?: number;
   /** 单次刷新最多检查多少部剧（按最近观看排序后的前 N 部） */
   limit?: number;
+  /** 只检查这一部剧（单行重检：忽略 24 小时检查点） */
+  seriesId?: string;
 }
 
 export const SEQUEL_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -63,15 +68,18 @@ export async function refreshWatchHistory(deps: RefreshDeps): Promise<RefreshRes
   let failed = 0;
 
   // 只看已看过的剧，且最近的优先；没有播放记录的剧不需要检查续作。
+  const only = deps?.seriesId ? String(deps.seriesId) : '';
   const candidates = (deps?.series ?? [])
     .filter((item) => item?.series_id && deps.playback?.[item.series_id])
-    .slice(0, limit);
+    .filter((item) => !only || String(item.series_id) === only)
+    .slice(0, only ? 1 : limit);
 
   for (const item of candidates) {
     const record = deps.playback?.[item.series_id] as RefreshRecord | undefined;
     if (!record) continue;
     const last = Number(record.lastSequelCheckAt) || 0;
-    if (last && now - last < interval) continue;
+    // 单行重检是用户明确要求，忽略 24 小时检查点。
+    if (!only && last && now - last < interval) continue;
 
     checked += 1;
     const keyword = sequelKeyword(item);
@@ -92,18 +100,22 @@ export async function refreshWatchHistory(deps: RefreshDeps): Promise<RefreshRes
     ];
     const base: RefreshRecord = { ...record, sequels: merged };
 
+    const reason = `续作检查未完成：${outcome?.error || '来源暂不可用'}`;
     if (outcome?.success) {
       updates[item.series_id] = {
         ...base,
         lastSequelCheckAt: now,
-        lastCheckError: '',
+        lastSequelCheckError: '',
+        // 分集没问题时把总错误清掉（保留分集自己的那份原因）
+        lastCheckError: record.lastEpisodeCheckError || '',
       };
     } else {
       failed += 1;
       updates[item.series_id] = {
         ...base,
         // 关键：不推进检查点，24 小时内还会再试
-        lastCheckError: `续作检查未完成：${outcome?.error || '来源暂不可用'}`,
+        lastSequelCheckError: reason,
+        lastCheckError: reason,
       };
     }
   }

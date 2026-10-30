@@ -73,6 +73,8 @@ export interface WindowControls {
 
 export interface HostServices {
   app(): AppInfo;
+  /** 交给系统浏览器打开外部链接（导航守卫判定为 external 时调用） */
+  openExternal(url: string): Promise<void>;
   userDataDir(): string;
   downloadsDir(): string;
   temporaryDir(): string;
@@ -88,3 +90,4 @@ export interface HostServices {
   windows?: WindowControls;
 }
 export * from './proxy.ts';
+export * from './tools.ts';

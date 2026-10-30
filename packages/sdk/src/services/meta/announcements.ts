@@ -41,7 +41,25 @@ function parseAnnouncement(response, urgent) {
   return { id: data.id, title: data.title.trim(), body: data.body.trim(), urgent };
 }
 
-function createAnnouncementService({ store, version, request, now = Date.now, isEnabled = () => true }) {
+function createAnnouncementService({
+  store,
+  version,
+  request,
+  now = Date.now,
+  isEnabled = () => true,
+  /**
+   * 紧急公告的主动推送。传入这个回调才叫「推送」——4.5 是轮询到新公告就推给渲染层；
+   * 重构时这里漏了调用，于是主进程注册的回调永远不触发、紧急公告再也弹不出来。
+   */
+  onAnnouncement,
+}: {
+  store: any;
+  version: string;
+  request: (url: string, options: any) => Promise<any>;
+  now?: () => number;
+  isEnabled?: () => boolean;
+  onAnnouncement?: (payload: { announcement: any }) => void;
+}) {
   let normalRequest: any = null;
   let emergencyRequest: any = null;
   let manualRequest: any = null;
@@ -51,6 +69,7 @@ function createAnnouncementService({ store, version, request, now = Date.now, is
   let emergencyGeneration = 0;
   let seenUrgentIds: any = null;
   const receivedUrgentIds = new Set();
+  const pushedUrgentIds = new Set();
 
   function getAnnouncementPreferences() {
     const preferences = store.getAnnouncementState().preferences;
@@ -150,6 +169,15 @@ function createAnnouncementService({ store, version, request, now = Date.now, is
         !seenIds().has(emergency.id)
       ) {
         receivedUrgentIds.add(emergency.id);
+        // 主动推一次；同一条公告在用户读完（确认）之前会反复被轮询到，这里只推新的。
+        if (!pushedUrgentIds.has(emergency.id)) {
+          pushedUrgentIds.add(emergency.id);
+          try {
+            onAnnouncement?.({ announcement: emergency });
+          } catch (_) {
+            /* 推送失败不影响本次轮询结果 */
+          }
+        }
         return { announcement: emergency };
       }
       const announcement = await normal;

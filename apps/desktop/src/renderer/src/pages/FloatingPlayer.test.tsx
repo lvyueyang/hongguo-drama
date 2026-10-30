@@ -16,7 +16,7 @@ describe('悬浮小窗', () => {
     render(<FloatingPlayer vid="11" seriesId="123" load={load} />);
     await waitFor(() => expect(screen.getByLabelText('悬浮小窗播放')).toBeTruthy());
     expect(load).toHaveBeenCalledWith('11', '123');
-    expect(screen.getByText('小窗播放中')).toBeTruthy();
+    expect(screen.getByText(/小窗播放中/)).toBeTruthy();
   });
 
   it('来源未开放时给出错误文案，不渲染播放器', async () => {
@@ -64,5 +64,85 @@ describe('悬浮小窗', () => {
     for (let index = 0; index < 5; index++) fireEvent.timeUpdate(video);
     // 5 秒内只写第一次
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe('小窗的集号、续播与连播（4.5 的悬浮宿主语义）', () => {
+  const episodes = [
+    { vid: 'v1', vid_index: 1 },
+    { vid: 'v2', vid_index: 2 },
+    { vid: 'v3', vid_index: 3, locked: true },
+  ];
+
+  it('按真实集号上报进度（不再写死第 1 集）', async () => {
+    const save = vi.fn(async () => ({}));
+    render(
+      <FloatingPlayer
+        vid="v2"
+        seriesId="123"
+        load={async () => ({ url: 'hongguo-stream://ep/v2' })}
+        save={save}
+        loadEpisodes={async () => episodes}
+      />,
+    );
+    const video = (await screen.findByLabelText('悬浮小窗播放')) as HTMLVideoElement;
+    Object.defineProperty(video, 'currentTime', { value: 12, configurable: true });
+    Object.defineProperty(video, 'duration', { value: 100, configurable: true });
+    fireEvent.pause(video);
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({ vid: 'v2', vidIndex: 2, currentTime: 12, watched: true }),
+    );
+    expect(screen.getByText(/第 2 集/)).toBeTruthy();
+  });
+
+  it('同一集有进度时续播到上次位置', async () => {
+    render(
+      <FloatingPlayer
+        vid="v2"
+        seriesId="123"
+        load={async () => ({ url: 'hongguo-stream://ep/v2' })}
+        loadEpisodes={async () => episodes}
+        readProgress={async () => ({ vid: 'v2', currentTime: 48 })}
+      />,
+    );
+    const video = (await screen.findByLabelText('悬浮小窗播放')) as HTMLVideoElement;
+    let seeked = 0;
+    Object.defineProperty(video, 'currentTime', {
+      configurable: true,
+      get: () => seeked,
+      set: (value: number) => {
+        seeked = value;
+      },
+    });
+    await waitFor(() => expect(seeked).toBe(0));
+    fireEvent.loadedMetadata(video);
+    await waitFor(() => expect(seeked).toBe(48));
+  });
+
+  it('播完自动接下一集；锁定的下一集不自动播', async () => {
+    const load = vi.fn(async (target: string) => ({ url: `hongguo-stream://ep/${target}` }));
+    render(
+      <FloatingPlayer
+        vid="v1"
+        seriesId="123"
+        load={load}
+        save={async () => ({})}
+        loadEpisodes={async () => episodes}
+      />,
+    );
+    const first = (await screen.findByLabelText('悬浮小窗播放')) as HTMLVideoElement;
+    Object.defineProperty(first, 'currentTime', { value: 100, configurable: true });
+    Object.defineProperty(first, 'duration', { value: 100, configurable: true });
+    fireEvent.ended(first);
+    await waitFor(() => expect(load).toHaveBeenLastCalledWith('v2', '123'));
+
+    // 第 2 集播完，下一集是锁定的第 3 集：不自动播
+    const second = (await screen.findByLabelText('悬浮小窗播放')) as HTMLVideoElement;
+    Object.defineProperty(second, 'currentTime', { value: 100, configurable: true });
+    Object.defineProperty(second, 'duration', { value: 100, configurable: true });
+    fireEvent.ended(second);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(load).toHaveBeenLastCalledWith('v2', '123');
   });
 });

@@ -13,7 +13,9 @@ import { build } from 'esbuild';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
-const outfile = path.join(root, 'out/main/workers/decrypt-worker.js');
+// 必须落在 out/main 之外：electron-vite 每次构建都会清空 out/main、out/preload、out/renderer，
+// 放在里面会被下一次构建（或 dev 重启）无声删掉，运行时就成了「解密线程脚本不存在」。
+const outfile = path.join(root, 'out/workers/decrypt-worker.js');
 
 mkdirSync(path.dirname(outfile), { recursive: true });
 await build({

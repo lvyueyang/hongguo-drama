@@ -11,6 +11,7 @@ import type { EventPayloads } from '@hongguo/contract';
 import { resolveProxyConfig, snapshotProxyEnv } from '@hongguo/host';
 import type { SdkAccountService } from '@hongguo/sdk';
 import {
+  applyEpisodeUpdate,
   applyPortableDataDir,
   availableRelease,
   collectEpisodeTargets,
@@ -24,13 +25,22 @@ import {
   defaultOutputPath,
   deleteStorageTargets,
   downloadEpisode,
+  episodeDeletionProblem,
+  filterHistory,
+  mergeNotificationMarks,
+  mergeSequelUpdates,
   mergeSeries,
   openBufferSession,
   openMediaSession,
+  partitionTargets,
+  planUpdateNotifications,
   prefetchNextEpisode,
   pruneEmptyDirs,
+  recordPlayback,
   refreshWatchHistory,
   resolveMediaTools,
+  resolvePortableDataDir,
+  seriesDeletionProblem,
   setNetTransport,
   sourceOf,
   transcodeForCompat,
@@ -38,13 +48,13 @@ import {
   verifyDownloadedFile,
 } from '@hongguo/sdk';
 import { episodeFilePath, renderName } from '@hongguo/shared';
-import { app, BrowserWindow, ipcMain, net, safeStorage, session } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, net, safeStorage, session } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import { createElectronHost } from './electron-host.ts';
 import { attachFloatingPlayerWindow, type FloatingPlayerHandle } from './floating-window.ts';
 import { registerIpcHandlers } from './ipc.ts';
 import { createMediaAccess } from './media-access.ts';
-import { decideNavigation, decidePermission } from './navigation-policy.ts';
+import { decideNavigation, decidePermission, isTrustedPermissionRequest } from './navigation-policy.ts';
 import { registerProtocols, registerSchemes, STREAM_SCHEME } from './protocols.ts';
 import { createProxyController } from './proxy-controller.ts';
 import {
@@ -53,6 +63,8 @@ import {
   type ProxySessionLike,
 } from './proxy-sessions.ts';
 import { createDownloadQueue } from './queue.ts';
+import { createShutdown } from './shutdown.ts';
+import { planDisabledSources } from './source-access.ts';
 
 const host = createElectronHost();
 const logger = host.logger();
@@ -67,11 +79,12 @@ const sdk = createSdk({
 const proxySnapshot = snapshotProxyEnv(process.env as Record<string, string | undefined>);
 const tools = resolveMediaTools(host);
 // out/main/workers/decrypt-worker.js 与主入口同目录产出。
-const decryptWorkerPath = path.join(__dirname, 'workers', 'decrypt-worker.js');
+// 与 scripts/build-worker.mjs 的产物位置一致；放在 out/main 之外，避免被 electron-vite 清掉。
+const decryptWorkerPath = path.join(__dirname, '..', 'workers', 'decrypt-worker.js');
 const sessions = createSessionRegistry();
 const mediaAccess = createMediaAccess(process.env.ELECTRON_RENDERER_URL);
 let mainWindow: BrowserWindow | null = null;
-const quitInProgress = false;
+let quitInProgress = false;
 
 const queue = createDownloadQueue({
   concurrency: () => Number(sdk.storage.getSettings().max_concurrent) || 3,
@@ -118,6 +131,10 @@ const queue = createDownloadQueue({
     })) as { url?: string; error?: string } | null;
     if (!playInfo?.url) throw new Error(playInfo?.error ?? '来源未开放该集');
     const result = await downloadEpisode({
+      // vid/seriesId 必须显式传：hema/xifan 的取源结果里没有 vid，
+      // 只从 playInfo 推断会让来源启用校验与重试拿到空 vid。
+      vid: task.vid,
+      seriesId: task.seriesId,
       playInfo: playInfo as never,
       outputPath: task.savePath,
       quality: task.quality,
@@ -182,7 +199,7 @@ const downloadPort = {
 const mergeRuns = new Map<string, { cancelled: boolean }>();
 
 const mergePort = {
-  async start(input: { seriesId: string; compatible: boolean }) {
+  async start(input: { seriesId: string; compatible: boolean; require1080?: boolean }) {
     const files = queue
       .list()
       .filter((task) => task.seriesId === input.seriesId && task.status === 'completed')
@@ -209,6 +226,7 @@ const mergePort = {
         outputPath,
         tools,
         compatible: input.compatible,
+        require1080: input.require1080 === true,
         onProgress: () =>
           sendToRenderer('merge-progress', {
             seriesId: input.seriesId,
@@ -242,20 +260,52 @@ const mergePort = {
   },
 };
 
+/** 在飞转码：退出时要能中断（否则进程带着 ffmpeg 子进程一起死，留下 .part）。 */
+const transcodeJobs = new Set<AbortController>();
+
 const transcodePort = {
   async run(input: { taskId: string }) {
     const task = queue.get(input.taskId);
     if (!task || task.status !== 'completed') throw new Error('找不到已完成的下载任务');
     const output = `${task.savePath}.compat.mp4`;
-    const result = await transcodeForCompat({
-      input: task.savePath,
-      output,
-      tools,
-      onProgress: (percent) => sendToRenderer('transcode-progress', { taskId: task.id, percent }),
-    });
-    return { url: mediaAccess.localUrl(result.output), cached: result.cached };
+    const controller = new AbortController();
+    transcodeJobs.add(controller);
+    try {
+      const result = await transcodeForCompat({
+        input: task.savePath,
+        output,
+        tools,
+        signal: controller.signal,
+        onProgress: (percent) => sendToRenderer('transcode-progress', { taskId: task.id, percent }),
+      });
+      return { url: mediaAccess.localUrl(result.output), cached: result.cached };
+    } finally {
+      transcodeJobs.delete(controller);
+    }
   },
 };
+
+/**
+ * 退出收尾控制器：先取消合并与转码、再停下载，等落定（最多 10 秒）后放行退出。
+ * 有界等待是硬要求——宁可留临时文件，也不能让用户点了退出却关不掉窗口。
+ */
+const shutdown = createShutdown({
+  cancelMerges: () => {
+    for (const run of mergeRuns.values()) run.cancelled = true;
+  },
+  stopDownloads: () => queue.stopAll(),
+  abortTranscodes: () => {
+    for (const controller of transcodeJobs) controller.abort();
+  },
+  isIdle: () =>
+    mergeRuns.size === 0 &&
+    transcodeJobs.size === 0 &&
+    !queue.list().some((task) => task.status === 'downloading'),
+  quit: () => {
+    quitInProgress = true;
+    app.quit();
+  },
+});
 
 const seriesList = () => sdk.storage.getSeries() as Array<Record<string, unknown> & { series_id: string }>;
 
@@ -321,46 +371,6 @@ const libraryPort = {
     list[index] = { ...list[index], dismissed: true } as never;
     sdk.storage.saveSeries(list as never);
     return { removed: true };
-  },
-};
-
-const seriesPort = {
-  episodes: (seriesId: string) => sdk.series.episodes(seriesId),
-  async sequels(seriesId: string) {
-    const entry = seriesList().find((item) => String(item.series_id) === String(seriesId));
-    if (!entry) throw new Error('未找到该剧档案，请先在剧库中打开');
-    const registry = seriesList().filter((item) => item.forgotten !== true);
-    return sdk.search.sequels(entry, registry, (keyword: string, call: unknown) =>
-      sdk.search.web(keyword, call),
-    );
-  },
-};
-
-const historyPort = {
-  list(scope: string) {
-    const rows = sdk.history.list(
-      seriesList(),
-      sdk.storage.getPlayback(),
-      sdk.storage.getSettings().watch_sequels_enabled !== false,
-    ) as Array<Record<string, unknown>>;
-    if (scope === 'latest') {
-      const seen = new Set<string>();
-      return rows.filter((row) => {
-        const key = String(row.series_id ?? '');
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-    }
-    if (scope === 'unfinished') {
-      return rows.filter((row) => {
-        const current = Number(row.currentTime) || 0;
-        const duration = Number(row.duration) || 0;
-        return !duration || current < duration * 0.95;
-      });
-    }
-    // 4.5 的 skip-completed-low 依赖分季计算结果；先按 all 返回，待分季页补齐
-    return rows;
   },
 };
 
@@ -452,6 +462,9 @@ const storagePort = {
     return collectStorageTargets({ root, records });
   },
   deleteSeries(seriesId: string) {
+    // 删除前先看有没有在跑的任务：4.5 会拒绝，删掉正在写的那份文件只会让下载失败得更难看。
+    const blocked = seriesDeletionProblem(queue.list(), seriesId);
+    if (blocked) throw new Error(blocked);
     const root = String(sdk.storage.getSettings().root || '') || host.downloadsDir();
     const records = queue
       .list()
@@ -467,6 +480,8 @@ const storagePort = {
   deleteEpisode(input: { taskId: string }) {
     const task = queue.get(input.taskId);
     if (!task) throw new Error('找不到该下载任务');
+    const blocked = episodeDeletionProblem(task);
+    if (blocked) throw new Error(blocked);
     const root = String(sdk.storage.getSettings().root || '') || host.downloadsDir();
     const episode = collectEpisodeTargets({ root, savePath: task.savePath });
     const result = deleteStorageTargets(episode.targets, { root });
@@ -478,11 +493,30 @@ const storagePort = {
   },
   deleteAll() {
     const root = String(sdk.storage.getSettings().root || '') || host.downloadsDir();
-    const usage = collectStorageTargets({ root });
-    const result = deleteStorageTargets(usage.targets, { root });
-    // 下载记录同步清掉，避免界面显示「已完成」但文件已不存在。
+    // 正在合并的剧集要保护：删掉源文件会让合并中途失败并留下坏产物。
+    const merging = new Set(mergeRuns.keys());
+    const guarded = new Set<string>();
+    for (const task of queue.list()) {
+      if (!merging.has(task.seriesId)) continue;
+      guarded.add(path.resolve(task.savePath));
+      guarded.add(path.resolve(`${task.savePath}.compat.mp4`));
+    }
+    // 顺序：先停写（否则删掉的正是下载正在写的那份），再删文件，最后清记录。
     queue.stopAll();
-    return { ...result, totalFiles: usage.totalFiles, totalBytes: usage.totalBytes };
+    const usage = collectStorageTargets({ root });
+    const { remove, kept } = partitionTargets(usage.targets, guarded);
+    const result = deleteStorageTargets(remove, { root });
+    // 记录同步清掉，避免界面显示「已完成」但文件已不存在（受保护的剧集保留记录）。
+    for (const task of queue.list()) {
+      if (!merging.has(task.seriesId)) queue.remove(task.id);
+    }
+    return {
+      ...result,
+      totalFiles: usage.totalFiles,
+      totalBytes: usage.totalBytes,
+      skipped: [...merging],
+      skippedFiles: kept.length,
+    };
   },
 };
 
@@ -493,7 +527,8 @@ const updateInstaller = createUpdateInstaller({
   // 退出过程中不允许再启动安装，避免半途打断清理（沿用 4.5 的约定）。
   installBlocker: () => Boolean(quitInProgress),
   // 未打包运行时 electron-updater 没有安装目标：如实标记不支持，别让用户点了才失败。
-  supported: app.isPackaged,
+  // 便携版同理：自动更新会把程序装到系统目录，必须让用户手动替换。
+  supported: app.isPackaged && !isPortableBuild(),
   supportedReason: app.isPackaged ? '' : '开发运行时不会自动更新，请使用打包版本。',
   emit: (state: unknown) => sendToRenderer('update-changed', state as never),
 } as never);
@@ -574,6 +609,39 @@ const exportPort = {
   },
 };
 
+const historyPort = {
+  list(scope: string) {
+    const rows = sdk.history.list(
+      seriesList(),
+      sdk.storage.getPlayback(),
+      sdk.storage.getSettings().watch_sequels_enabled !== false,
+    ) as Array<Record<string, unknown>>;
+    // 筛选逻辑在 SDK 的纯函数里（filterHistory），宿主只负责取数。
+    return filterHistory(rows as never, scope as never);
+  },
+  remove(seriesId: string) {
+    // 移除观看记录：只删记录，不动剧库档案（4.5 的 remove-watch-history 就是这个语义）。
+    const playback = sdk.storage.getPlayback() as Record<string, unknown>;
+    const key = String(seriesId);
+    if (!(key in playback)) return { removed: false };
+    delete playback[key];
+    sdk.storage.savePlayback(playback as never);
+    return { removed: true };
+  },
+};
+
+const seriesPort = {
+  episodes: (seriesId: string) => sdk.series.episodes(seriesId),
+  async sequels(seriesId: string) {
+    const entry = seriesList().find((item) => String(item.series_id) === String(seriesId));
+    if (!entry) throw new Error('未找到该剧档案，请先在剧库中打开');
+    const registry = seriesList().filter((item) => item.forgotten !== true);
+    return sdk.search.sequels(entry, registry, (keyword: string, call: unknown) =>
+      sdk.search.web(keyword, call),
+    );
+  },
+};
+
 const progressPort = {
   get(seriesId: string) {
     const record = (sdk.storage.getPlayback() as Record<string, Record<string, unknown>>)[String(seriesId)];
@@ -594,6 +662,7 @@ const progressPort = {
     currentTime: number;
     duration: number;
     watched: boolean;
+    ended?: boolean;
   }) {
     const playback = sdk.storage.getPlayback() as Record<string, Record<string, unknown>>;
     const previous = playback[input.seriesId] ?? {};
@@ -602,13 +671,24 @@ const progressPort = {
     const currentTime = sameEpisode
       ? Math.max(Number(previous.currentTime) || 0, input.currentTime)
       : input.currentTime;
+    const duration = input.duration || Number(previous.duration) || 0;
+    // 完成证据（`completedEpisode`）由 recordPlayback 统一算：只有「播到结尾」才算看完，
+    // 暂停、拖到最后、只看了一部分都不能让「已看完的低季不再提示」误伤。
+    const series = seriesList().find((item) => String(item.series_id) === String(input.seriesId));
+    const recorded = recordPlayback(
+      previous,
+      series ?? { series_id: input.seriesId, total: 0 },
+      input.vidIndex,
+      currentTime,
+      Date.now(),
+      { duration, ended: input.ended === true && input.watched === true },
+    ) as Record<string, unknown>;
     const next = {
       ...previous,
+      ...recorded,
       vid: input.vid,
       vid_index: input.vidIndex,
-      currentTime,
-      duration: input.duration || Number(previous.duration) || 0,
-      updatedAt: Date.now(),
+      duration,
       watched: input.watched === true || previous.watched === true,
     };
     playback[input.seriesId] = next;
@@ -636,31 +716,24 @@ const prefetchPort = {
  * 后台续作刷新：只查该剧自己的来源，有限次数；部分失败不推进 24 小时检查点。
  * 记录写回走 storage，刷新本身不阻塞界面。
  */
-const historyRefreshPort = {
-  async refresh() {
-    const registry = (sdk.storage.getSeries?.() ?? []) as never[];
-    const playback = (sdk.storage.getPlayback?.() ?? {}) as Record<string, never>;
-    const result = await refreshWatchHistory({
-      series: registry as never,
-      playback,
-      searchSequels: (series: { series_id: string; series_title: string }, keyword: string) =>
-        sdk.search.sequels(series, [], (query: string) =>
-          sdk.search.bySource(query, {
-            source: sourceOf(series.series_id) ?? undefined,
-            deadline: Date.now() + 10_000,
-          }),
-        ) as never,
-    });
-    if (Object.keys(result.updates).length) {
-      // 存储接口是整表写入：合并后再写一次，避免把别的剧的记录覆盖掉。
-      const merged = { ...playback, ...result.updates };
-      sdk.storage.savePlayback(merged);
+let floatingHandle: FloatingPlayerHandle | null = null;
+
+const searchPort = {
+  query(input: { keyword: string; page?: number; source?: string }) {
+    // 单次搜索总预算 20s：所有来源共用，慢来源不会各自重开计时。
+    const deadline = Date.now() + 20_000;
+    const source = String(input.source ?? 'hongguo');
+    if (source === 'hongguo') {
+      // 红果走完整链路：App 优先 → 官网兜底 → 5xx 用 App 救场 → 首页补一次今日上新。
+      // 其它来源各走自己的适配器（bySource）。
+      return sdk.search.series2(input.keyword, {
+        page: input.page ?? 1,
+        deadline,
+      });
     }
-    return { checked: result.checked, failed: result.failed };
+    return sdk.search.bySource(input.keyword, { source, page: input.page ?? 1, deadline });
   },
 };
-
-let floatingHandle: FloatingPlayerHandle | null = null;
 
 const floatingPort = {
   open(input: { vid: string; seriesId: string }) {
@@ -677,7 +750,7 @@ const floatingPort = {
       url: buildRendererUrl({ floating: '1', vid: input.vid, seriesId: input.seriesId }),
       size: settings.floating_player_size,
       // 导航守卫：只允许停在应用自身页面上（外部链接一律拦下）
-      isTrustedUrl: (url) => decideNavigation(url, { appOrigins: appOrigins() }) === 'allow',
+      isTrustedUrl: (url) => decideNavigation(url, navigationContext()) === 'allow',
       persistSize: (size) => {
         // 必须合并已有设置，不能只写这一个键。
         sdk.storage.saveSettings({ ...sdk.storage.getSettings(), floating_player_size: size });
@@ -696,17 +769,86 @@ const floatingPort = {
   },
 };
 
-const searchPort = {
-  query(input: { keyword: string; page?: number; source?: string }) {
-    // 单次搜索总预算 20s：所有来源共用，慢来源不会各自重开计时。
-    const deadline = Date.now() + 20_000;
-    return sdk.search.bySource(input.keyword, {
-      source: input.source,
-      page: input.page ?? 1,
-      deadline,
+const historyRefreshPort = {
+  /**
+   * 后台/单行更新检查。
+   *
+   * 一轮做三件事：续作检查（24 小时检查点）→ 分集总量检查（红点来源）→ 更新通知（去重）。
+   * `seriesId` 存在时只查那一部，并且忽略 24 小时检查点（用户主动点的「检查更新」）。
+   */
+  async refresh(seriesId?: string) {
+    const registry = (sdk.storage.getSeries?.() ?? []).filter(
+      (item: any) => item.forgotten !== true,
+    ) as never[];
+    const playback = (sdk.storage.getPlayback?.() ?? {}) as Record<string, never>;
+    const result = await refreshWatchHistory({
+      series: registry as never,
+      playback,
+      ...(seriesId ? { seriesId } : {}),
+      searchSequels: (series: { series_id: string; series_title: string }, keyword: string) =>
+        sdk.search.sequels(series, [], (query: string) =>
+          sdk.search.bySource(query, {
+            source: sourceOf(series.series_id) ?? undefined,
+            deadline: Date.now() + 10_000,
+          }),
+        ) as never,
     });
+    if (Object.keys(result.updates).length) {
+      // 写回时重新取一遍并只合并续作字段：刷新期间的进度保存与删除都不能被覆盖/复活。
+      const latest = (sdk.storage.getPlayback?.() ?? {}) as Record<string, Record<string, unknown>>;
+      sdk.storage.savePlayback(
+        mergeSequelUpdates(latest, result.updates as Record<string, Record<string, unknown>>) as never,
+      );
+    }
+
+    // 分集总量检查：这才是「未看集数」的来源（续作检查只关心新季）。
+    const watchedIds = Object.keys(sdk.storage.getPlayback() as object)
+      .filter((id) => !seriesId || id === seriesId)
+      .slice(0, 20);
+    for (const id of watchedIds) {
+      const entry = seriesList().find((item) => String(item.series_id) === id);
+      const current = (sdk.storage.getPlayback() as Record<string, Record<string, unknown>>)[id];
+      if (!entry || !current) continue;
+      const all = sdk.storage.getPlayback() as Record<string, Record<string, unknown>>;
+      try {
+        const fresh = (await sdk.series.episodes(id)) as Record<string, unknown>;
+        if (!all[id]) continue; // 期间被移除：不复活
+        all[id] = applyEpisodeUpdate(all[id] as never, entry as never, fresh as never, Date.now()) as Record<
+          string,
+          unknown
+        >;
+      } catch (error) {
+        if (!all[id]) continue;
+        const reason = `分集检查未完成：${(error as Error).message}`;
+        all[id] = { ...all[id], lastEpisodeCheckError: reason, lastCheckError: reason };
+      }
+      sdk.storage.savePlayback(all as never);
+    }
+
+    notifyUpdates();
+    return { checked: result.checked, failed: result.failed };
   },
 };
+
+/** 更新通知：同一条只提醒一次；开关关掉就一条都不发。 */
+function notifyUpdates(): void {
+  const settings = sdk.storage.getSettings() as { watch_notifications_enabled?: boolean };
+  if (settings.watch_notifications_enabled === false) return;
+  const rows = historyPort.list('all') as Array<Record<string, unknown>>;
+  const playback = sdk.storage.getPlayback() as Record<string, never>;
+  const plan = planUpdateNotifications(rows as never, playback as never);
+  if (!plan.notifications.length) return;
+  for (const item of plan.notifications) {
+    try {
+      if (typeof Notification?.isSupported === 'function' && !Notification.isSupported()) continue;
+      new Notification({ title: item.title, body: item.body }).show();
+    } catch {
+      // 通知失败不影响检查结果
+    }
+  }
+  const latest = sdk.storage.getPlayback() as Record<string, Record<string, unknown>>;
+  sdk.storage.savePlayback(mergeNotificationMarks(latest, plan.updates as never) as never);
+}
 
 const rankingsPort = {
   list: (kind: string, page: number) => sdk.catalog.app({ category: kind, page }),
@@ -811,9 +953,11 @@ const playbackCache = createEpisodeCache({
 });
 
 const playbackPort = {
-  async prepare(input: { vid: string; seriesId?: string; quality: string }) {
+  async prepare(input: { vid: string; seriesId?: string; quality: string; force?: boolean }) {
     const playInfo = (await sdk.playback.sources(input.vid, input.seriesId, {
       quality: input.quality,
+      // 手动重试必须强制换一次源：否则会把上次失败的缓存结果原样再拿一遍。
+      ...(input.force ? { force: true } : {}),
     })) as { url?: string; error?: string; contentKey?: string; spadeA?: string; source?: string } | null;
     if (!playInfo?.url) throw new Error(playInfo?.error ?? '来源未开放该集');
 
@@ -824,13 +968,15 @@ const playbackPort = {
       playInfo.contentKey ?? null,
       playInfo.spadeA ?? null,
     ]);
-    const cached = playbackCache.lookup({
-      key: cacheKey,
-      vid: input.vid,
-      seriesId: input.seriesId,
-      source: playInfo.source,
-      mediaIdentity,
-    });
+    const cached = input.force
+      ? null
+      : playbackCache.lookup({
+          key: cacheKey,
+          vid: input.vid,
+          seriesId: input.seriesId,
+          source: playInfo.source,
+          mediaIdentity,
+        });
 
     if (!cached) {
       const session = await openMediaSession(
@@ -863,13 +1009,91 @@ const playbackPort = {
     const session = openBufferSession({ buffer, vid: input.vid, seriesId: input.seriesId }, sessions);
     return { url: `${STREAM_SCHEME}://play/${session.id}`, sessionId: session.id };
   },
+  cancel(sessionId: string) {
+    // 释放会话：中止在飞上游连接、删掉解密临时文件（离开这一集/重试前都要调）。
+    const known = sessions.get(sessionId);
+    sessions.release(sessionId);
+    return { released: Boolean(known) };
+  },
 };
 
 /** 只接受本窗口主 frame 的请求；其余一律拒绝（沿用 4.5 的安全约定）。 */
 /** 允许在应用窗口内加载的来源（开发服务器 origin；打包后是 file:）。 */
+/**
+ * 应用菜单（macOS 需要它才有 Cmd+C/V/A 这些编辑快捷键）。
+ *
+ * 菜单项只给标准角色，不放自定义动作：界面里的功能都有可见入口，
+ * 菜单再放一份只会出现两套状态需要同步。
+ */
+function installApplicationMenu(): void {
+  const isMac = process.platform === 'darwin';
+  const template: Array<Record<string, unknown>> = [
+    ...(isMac
+      ? [
+          {
+            label: app.getName(),
+            submenu: [
+              { role: 'about' },
+              { type: 'separator' },
+              { role: 'hide' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+              { role: 'quit' },
+            ],
+          },
+        ]
+      : []),
+    {
+      label: '编辑',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: '视图',
+      submenu: [
+        { role: 'reload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+    { label: '窗口', submenu: [{ role: 'minimize' }, { role: 'close' }] },
+  ];
+  try {
+    Menu.setApplicationMenu(Menu.buildFromTemplate(template as never));
+  } catch (error) {
+    logger.warn(`应用菜单创建失败: ${(error as Error).message}`);
+  }
+}
+
+/** 便携包（Windows 便携 EXE / 便携 ZIP）：不支持自动更新，只能手动替换程序。 */
+function isPortableBuild(): boolean {
+  try {
+    return Boolean(resolvePortableDataDir({ env: process.env, platform: process.platform }).portableDir);
+  } catch {
+    return false;
+  }
+}
+
 function appOrigins(): string[] {
   const devServer = process.env.ELECTRON_RENDERER_URL;
   return devServer ? [new URL(devServer).origin] : [];
+}
+
+/** 导航上下文：开发服务器 origin + 打包后的渲染入口文件（只认这一个 file:）。 */
+function navigationContext(): { appOrigins: string[]; appFiles: string[] } {
+  return {
+    appOrigins: appOrigins(),
+    appFiles: [path.join(__dirname, '../renderer/index.html').replace(/\\/g, '/')],
+  };
 }
 
 /** 渲染层入口地址（含 query）。悬浮窗复用它，保证与主窗口同一套资源与协议。 */
@@ -882,6 +1106,11 @@ function buildRendererUrl(query: Record<string, string>): string {
   }
   const file = path.join(__dirname, '../renderer/index.html');
   return `${pathToFileURL(file).href}?${search}`;
+}
+
+/** 外部链接交给系统浏览器（宿主把 openExternal 放在顶层，不是 windows 下）。 */
+function openExternal(url: string): void {
+  void host.openExternal?.(url)?.catch?.(() => {});
 }
 
 function isTrustedSender(event: unknown): boolean {
@@ -921,24 +1150,45 @@ function createWindow(): void {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
-  const origins = appOrigins();
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     // 新窗口一律不在应用内打开；https 只交给系统浏览器。
-    if (decideNavigation(url, { appOrigins: origins }) === 'external') void host.windows?.openExternal?.(url);
+    if (decideNavigation(url, navigationContext()) === 'external') void openExternal(url);
     return { action: 'deny' };
   });
   // 页面内跳转：应用自身允许，外部交给系统浏览器，其它协议拒绝。
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    const decision = decideNavigation(url, { appOrigins: origins });
+    const decision = decideNavigation(url, navigationContext());
     if (decision === 'allow') return;
     event.preventDefault();
-    if (decision === 'external') void host.windows?.openExternal?.(url);
+    if (decision === 'external') void openExternal(url);
   });
-  // 播放与下载都不需要敏感权限：一律拒绝。
-  mainWindow.webContents.session.setPermissionRequestHandler((_contents, permission, callback) => {
-    callback(decidePermission(permission));
+  // 服务器重定向也要守：主窗口只注册 will-navigate 的话，302 到外部站点会被放行。
+  mainWindow.webContents.on('will-redirect', (event, url) => {
+    const decision = decideNavigation(url, navigationContext());
+    if (decision === 'allow') return;
+    event.preventDefault();
+    if (decision === 'external') void openExternal(url);
   });
+  // 播放与下载不需要敏感权限：一律拒绝；但全屏与剪贴板是播放器/分享链接要用的，
+  // 只给应用自己的主 frame，其余（子 frame、外部页面、窗口已销毁）全部拒绝。
+  const permissionTrusted = (contents: unknown, details: unknown, origin?: string): boolean => {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    if (contents !== mainWindow.webContents) return false;
+    const info = details as { isMainFrame?: boolean; requestingUrl?: string } | null | undefined;
+    return isTrustedPermissionRequest(
+      { isMainFrame: info?.isMainFrame, requestingUrl: info?.requestingUrl ?? origin ?? '' },
+      navigationContext(),
+    );
+  };
+  mainWindow.webContents.session.setPermissionRequestHandler((contents, permission, callback, details) => {
+    callback(decidePermission(permission, { trusted: permissionTrusted(contents, details) }));
+  });
+  // 有些 API 走的是「同步检查」而不是「请求」：两条路径用同一套策略，不然会出现
+  // 「请求被允许但检查被拒」这种看起来像 bug 的不一致。
+  mainWindow.webContents.session.setPermissionCheckHandler((contents, permission, origin, details) =>
+    decidePermission(permission, { trusted: permissionTrusted(contents, details, String(origin ?? '')) }),
+  );
 
   const devServer = process.env.ELECTRON_RENDERER_URL;
   if (devServer) void mainWindow.loadURL(devServer);
@@ -960,11 +1210,15 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   // 便携版：必须在任何 getPath('userData') 之前切换目录，否则首个读到的还是系统目录。
-  const portable = applyPortableDataDir({
-    app,
-    defaultUserData: app.getPath('userData'),
-  });
-  if (portable.reason) logger.warn(portable.reason);
+  // 但用户显式给了 --user-data-dir 时要尊重它（4.5 的规则：便携迁移只改「默认」目录）。
+  const explicitUserData = Boolean(app.commandLine.hasSwitch?.('user-data-dir'));
+  if (!explicitUserData) {
+    const portable = applyPortableDataDir({
+      app,
+      defaultUserData: app.getPath('userData'),
+    });
+    if (portable.reason) logger.warn(portable.reason);
+  }
 
   void app.whenReady().then(() => {
     // 会话只能在 app ready 之后访问。
@@ -973,6 +1227,20 @@ if (!app.requestSingleInstanceLock()) {
       sdk.storage.init(path.join(host.userDataDir(), 'data.json'));
     } catch (error) {
       logger.warn(`本地数据初始化失败: ${(error as Error).message}`);
+    }
+    // 读盘失败（文件损坏/无权限）时不能静默带病运行：后面每一次保存都会失败。
+    // 4.5 直接弹框退出；这里保留应用可用性，只提示一次并说明「保存会失败」。
+    const readFailure = sdk.storage.readError?.();
+    if (readFailure) {
+      logger.warn(`本地数据读取失败: ${readFailure.message}`);
+      try {
+        dialog.showErrorBox(
+          '本地数据读取失败',
+          `${readFailure.message}\n\n设置与记录暂时无法保存。请检查 ${host.userDataDir()} 下的 data.json 后重启应用。`,
+        );
+      } catch {
+        /* 无 GUI 环境忽略 */
+      }
     }
     // 存储初始化之后再回填上次的下载任务（构造队列时存储还没就绪）。
     queue.restore((sdk.storage.getTasks() as never[]) ?? []);
@@ -986,7 +1254,31 @@ if (!app.requestSingleInstanceLock()) {
     registerIpcHandlers({
       // Electron 的 handle 多一个 event 参数，这里收敛成契约里的形状。
       ipcMain: { handle: (channel, listener) => ipcMain.handle(channel, listener) },
-      sdk,
+      // 设置保存时若停用了自定义源，要立刻把它的在飞任务与已解密内容收掉；
+      // 只在 IPC 入口包一层，内部写设置（代理、更新开关等）不需要这段收尾。
+      sdk: {
+        ...sdk,
+        storage: {
+          ...sdk.storage,
+          saveSettings: (next: Record<string, unknown>) => {
+            const before = sdk.storage.getSettings().custom_sources;
+            sdk.storage.saveSettings(next as never);
+            const plan = planDisabledSources(
+              before as never,
+              sdk.storage.getSettings().custom_sources as never,
+              queue.list(),
+            );
+            if (!plan.disabledIds.length) return;
+            for (const id of plan.stoppedTaskIds) queue.pause(id);
+            if (plan.clearSessions) sessions.clear();
+            if (plan.clearCache) playbackCache.clear();
+            if (plan.cancelRequests) {
+              for (const id of plan.disabledIds) sdk.catalog.cancelRequests(id);
+            }
+            logger.warn(`已停用自定义源并收尾：${plan.disabledIds.join('、')}`);
+          },
+        },
+      },
       search: searchPort,
       floating: floatingPort,
       prefetch: prefetchPort,
@@ -1012,6 +1304,48 @@ if (!app.requestSingleInstanceLock()) {
       logger,
     });
     createWindow();
+    installApplicationMenu();
+
+    // 退出收尾：取消合并 → 停下载 → 断转码 → 有界等待 → 真正退出。
+    // 注册在窗口建好之后：收尾要通知渲染层状态，没有窗口就没必要拦。
+    app.on('before-quit', (event) => {
+      const idle =
+        mergeRuns.size === 0 &&
+        transcodeJobs.size === 0 &&
+        !queue.list().some((task) => task.status === 'downloading');
+      if (idle) {
+        quitInProgress = true;
+        return;
+      }
+      shutdown.handleBeforeQuit(event);
+    });
+
+    // 后台更新检查：启动 30 秒后查一次，之后每 6 小时一次。
+    // 开关是 watch_updates_enabled（4.5 死掉的设置之一），关掉就完全不查。
+    const updateCheckTimer = setInterval(
+      () => {
+        if (sdk.storage.getSettings().watch_updates_enabled === false) return;
+        void historyRefreshPort.refresh().catch(() => {});
+      },
+      6 * 60 * 60 * 1000,
+    );
+    updateCheckTimer.unref?.();
+    const updateCheckKickoff = setTimeout(() => {
+      if (sdk.storage.getSettings().watch_updates_enabled === false) return;
+      void historyRefreshPort.refresh().catch(() => {});
+    }, 30_000);
+    updateCheckKickoff.unref?.();
+
+    // 紧急公告要能主动弹出来：启动后查一次，之后定期查。
+    // 只在窗口建好后开始，保证事件有接收方；定时器不阻止退出。
+    const announcementTimer = setInterval(
+      () => {
+        void announcementPort.check().catch(() => {});
+      },
+      15 * 60 * 1000,
+    );
+    announcementTimer.unref?.();
+    void announcementPort.check().catch(() => {});
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();

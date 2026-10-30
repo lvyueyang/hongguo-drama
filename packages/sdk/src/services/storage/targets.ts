@@ -291,3 +291,47 @@ export function collectEpisodeTargets(input: { root: string; savePath: string })
     targets,
   };
 }
+
+/** 正在下载/排队的任务不能删文件：删掉的是它正在写的那份，下载会失败或留下垃圾。 */
+const RUNNING_STATUSES = ['pending', 'downloading'];
+
+export function episodeDeletionProblem(task: { status?: string } | null | undefined): string | null {
+  const status = String(task?.status ?? '');
+  return RUNNING_STATUSES.includes(status) ? '这一集正在下载，请先暂停或等它完成后再删除' : null;
+}
+
+/** 整剧删除同理：只要该剧还有在跑的任务，就先别动它的文件。 */
+export function seriesDeletionProblem(
+  tasks: Array<{ seriesId?: string; status?: string }> | null | undefined,
+  seriesId: string,
+): string | null {
+  const running = (Array.isArray(tasks) ? tasks : []).filter(
+    (task) =>
+      String(task?.seriesId ?? '') === String(seriesId) &&
+      RUNNING_STATUSES.includes(String(task?.status ?? '')),
+  );
+  return running.length ? `《${seriesId}》还有 ${running.length} 集在下载，请先暂停或等它完成后再删除` : null;
+}
+
+/**
+ * 把目标集分成「可以删」与「要保护」两部分。
+ *
+ * 「删除全部」不该动正在合并的剧集：合并正在读那些源文件，删掉会让它中途失败并留下坏产物。
+ * 4.5 的做法是跳过并提示，这里保留同样的语义，只是把判定抽成纯函数。
+ */
+export function partitionTargets(
+  targets: StorageTarget[] | null | undefined,
+  protectedPaths: Iterable<string> | null | undefined,
+): { remove: StorageTarget[]; kept: StorageTarget[] } {
+  const guarded = new Set<string>();
+  for (const file of protectedPaths ?? []) {
+    if (file) guarded.add(path.resolve(String(file)));
+  }
+  const remove: StorageTarget[] = [];
+  const kept: StorageTarget[] = [];
+  for (const target of Array.isArray(targets) ? targets : []) {
+    if (guarded.has(path.resolve(String(target.path)))) kept.push(target);
+    else remove.push(target);
+  }
+  return { remove, kept };
+}

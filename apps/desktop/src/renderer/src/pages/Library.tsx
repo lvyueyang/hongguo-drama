@@ -45,7 +45,6 @@ export default function Library() {
   const listRef = useRef<Episode[]>([]);
   const playingRef = useRef<string>('');
   const lastSavedAt = useRef(0);
-  const restoredFor = useRef('');
 
   const library = useQuery({ queryKey: ['library'], queryFn: () => api.libraryList() });
   const entries = Array.isArray(library.data) ? (library.data as SeriesEntry[]) : [];
@@ -59,28 +58,72 @@ export default function Library() {
   const detail = (episodes.data ?? current) as SeriesEntry | undefined;
   const list = detail?.episodes ?? [];
 
+  /**
+   * 播放请求的序列号：取流是并发的，晚到的回复**绝不能**顶掉用户当前选的那一集
+   * （4.5 的 check-player-download-state 专门守这条）。
+   */
+  const playSeq = useRef(0);
+  /** 取流失败过的分集：重试时强制换源。 */
+  const failedPlayRef = useRef<Set<string>>(new Set());
+  /** 已经写完 watched 的那一集：换集前不必再补写一次（否则把 watched 写回 false）。 */
+  const endedRef = useRef('');
+  /**
+   * 是否真的播放过：自动播放被拦、只加载了元数据、取流后立刻失败时，
+   * pause 也会触发，但这些情况不能把一集记成「看过」（4.5 check-playback-speed 守的就是这条）。
+   */
+  const playedRef = useRef('');
+  /** 待恢复的续播位置：由 onLoadedMetadata 应用（此刻 video 元素才挂载）。 */
+  const restoreRef = useRef<{ vid: string; time: number } | null>(null);
+  const speedRef = useRef(1);
+
   const play = useMutation({
     mutationFn: (episode: Episode) =>
-      api.playPrepare({ vid: episode.vid, seriesId: selected, quality: 'auto' }),
-    onSuccess: async (result, episode) => {
+      api.playPrepare({
+        vid: episode.vid,
+        seriesId: selected,
+        quality: 'auto',
+        // 上一次失败的集再点一次：强制重新取源，别把失败结果从缓存里再拿一遍
+        force: failedPlayRef.current.has(episode.vid),
+      }),
+    // 每次请求领一个序号：onSuccess 里比对它才知道自己是不是「最新那一次」。
+    onMutate: () => {
+      playSeq.current += 1;
+      return { seq: playSeq.current };
+    },
+    onSuccess: async (result, episode, context) => {
+      const seq = context?.seq;
+      if (seq === undefined || seq !== playSeq.current) return;
+      // 换集前先把上一集的位置落盘（否则最多丢 5 秒）。
+      if (playing && playing.vid !== episode.vid) saveCurrentProgress(true);
+      endedRef.current = '';
+      failedPlayRef.current.delete(episode.vid);
       setPlaying({
         url: result.url,
         label: `第 ${episode.vid_index} 集`,
         vid: episode.vid,
         vidIndex: episode.vid_index,
       });
+      // 成功即清掉上一次的失败提示，避免「已经能播了还在报错」。
+      setNotice('');
       void client.invalidateQueries({ queryKey: ['history'] });
       // 续播：只有进度属于同一集时才有意义，跨集不套用时间。
-      const saved = await api.progressGet(selected);
-      if (!saved || saved.vid !== episode.vid) return;
-      restoredFor.current = episode.vid;
-      const video = videoRef.current;
-      if (video && saved.currentTime > 3) {
-        video.currentTime = saved.currentTime;
-        setNotice(`从上次的 ${Math.floor(saved.currentTime)} 秒继续`);
+      try {
+        const saved = await api.progressGet(selected);
+        if (seq !== playSeq.current) return;
+        const target = saved && saved.vid === episode.vid && saved.currentTime > 3 ? saved.currentTime : 0;
+        restoreRef.current = target ? { vid: episode.vid, time: target } : null;
+      } catch {
+        /* 进度读不到就从头播 */
       }
     },
-    onError: (error) => setNotice(`播放失败：${(error as Error).message}`),
+    onError: (error, episode, context) => {
+      // 迟到的失败同样不能覆盖更新的请求
+      if (context?.seq !== undefined && context.seq !== playSeq.current) return;
+      failedPlayRef.current.add(episode.vid);
+      restoreRef.current = null;
+      // 文案保持「播放失败：原因」的形状：失败的是哪一集在播放器标题里已经写着。
+      setNotice(`播放失败：${(error as Error).message}`);
+    },
   });
 
   const [danmaku, setDanmaku] = useState<{ items: unknown[]; notice: string } | null>(null);
@@ -123,11 +166,17 @@ export default function Library() {
 
   const toggleFloat = async (): Promise<void> => {
     if (floating) {
-      await api.floatClose();
+      try {
+        await api.floatClose();
+      } catch (error) {
+        setNotice(`收回悬浮小窗失败：${(error as Error).message}`);
+      }
       setFloating(false);
       return;
     }
     if (!playing) return;
+    // 开小窗 = 换到另一个播放器：先把当前位置落盘，小窗才能接着播。
+    saveCurrentProgress(true);
     const settings = (await api.getSettings()) as { picture_in_picture_mode?: string };
     // native：交给系统画中画，视频继续在应用内播放；custom：开应用自己的悬浮窗口。
     if (settings?.picture_in_picture_mode !== 'custom') {
@@ -146,12 +195,26 @@ export default function Library() {
         }
       }
     }
-    await api.floatOpen(playing.vid, selected);
-    setFloating(true);
+    // 打开失败（窗口被拒、父窗口已销毁）必须让用户知道，并把按钮状态回滚。
+    try {
+      await api.floatOpen(playing.vid, selected);
+      setFloating(true);
+    } catch (error) {
+      setFloating(false);
+      setNotice(`悬浮小窗打开失败：${(error as Error).message}`);
+    }
   };
 
   const playRef = useRef<((episode: Episode) => void) | null>(null);
   playRef.current = (episode: Episode) => play.mutate(episode);
+
+  /** 保存「当前正在播」这一集的位置（换集/开小窗/离开页面前用）。 */
+  function saveCurrentProgress(immediate = false): void {
+    const video = videoRef.current;
+    // 已经播完的那一集由 onEnded 写成 watched=true，这里再补一刀只会写回 watched=false。
+    if (!video || !playing || endedRef.current === playing.vid) return;
+    saveProgress(video, false, immediate);
+  }
 
   const enqueue = useMutation({
     mutationFn: () =>
@@ -172,10 +235,11 @@ export default function Library() {
 
   /** 每 5 秒最多落盘一次；拖动回看不会把进度写小（主进程侧取 max）。 */
   const saveProgress = useCallback(
-    (video: HTMLVideoElement, watched = false) => {
+    (video: HTMLVideoElement, watched = false, immediate = false, ended = false) => {
       if (!playing || !Number.isFinite(video.currentTime)) return;
+      const reallyWatched = watched && playedRef.current === playing.vid;
       const now = Date.now();
-      if (!watched && now - lastSavedAt.current < 5000) return;
+      if (!watched && !immediate && now - lastSavedAt.current < 5000) return;
       lastSavedAt.current = now;
       void api
         .progressSave({
@@ -184,7 +248,9 @@ export default function Library() {
           vidIndex: playing.vidIndex,
           currentTime: video.currentTime,
           duration: Number.isFinite(video.duration) ? video.duration : 0,
-          watched,
+          watched: reallyWatched,
+          // 完成证据只看「播到结尾」，暂停不算（主进程据此算 completedEpisode）。
+          ended: ended && reallyWatched,
         })
         .catch(() => {
           /* 进度保存失败不影响播放 */
@@ -211,6 +277,11 @@ export default function Library() {
   listRef.current = list;
   playingRef.current = playing?.vid ?? '';
   autoNextRef.current = autoNext;
+
+  /** 快捷键/双击换集时用：立即写掉当前集进度（不受 5 秒节流限制）。 */
+  const saveBeforeSwitchRef = useRef<() => void>(() => {});
+  saveBeforeSwitchRef.current = () => saveCurrentProgress(true);
+  const saveBeforeSwitch = useCallback(() => saveBeforeSwitchRef.current(), []);
 
   /** 键盘快捷键：绑定优先，未命中的按键保留浏览器默认行为。 */
   useEffect(() => {
@@ -243,7 +314,10 @@ export default function Library() {
         case 'next': {
           const index = listRef.current.findIndex((episode) => episode.vid === playingRef.current);
           const target = listRef.current[action.id === 'next' ? index + 1 : index - 1];
-          if (target && !target.locked) playRef.current(target);
+          if (!target || target.locked) break;
+          // 换集前把当前集的位置写掉，别让用户的观看进度丢在内存里。
+          saveBeforeSwitch();
+          playRef.current(target);
           break;
         }
         case 'autoNext':
@@ -256,6 +330,7 @@ export default function Library() {
             Math.max(0.25, Number((video.playbackRate + (action.id === 'faster' ? 0.25 : -0.25)).toFixed(2))),
           );
           video.playbackRate = next;
+          speedRef.current = next;
           setSpeed(next);
           break;
         }
@@ -314,6 +389,15 @@ export default function Library() {
 
         {notice && <p className="text-[var(--font-size-label)] text-secondary-text">{notice}</p>}
 
+        {episodes.isError && (
+          <p className="flex items-center gap-2 text-[var(--font-size-label)] text-danger">
+            分集加载失败：{(episodes.error as Error).message}
+            <Button size="sm" variant="ghost" onClick={() => void episodes.refetch()}>
+              重试
+            </Button>
+          </p>
+        )}
+
         {playing && (
           <Card className="overflow-hidden">
             <div className="relative">
@@ -337,6 +421,19 @@ export default function Library() {
                 autoPlay
                 className="max-h-[52vh] w-full bg-black"
                 aria-label={`正在播放 ${playing.label}`}
+                onLoadedMetadata={(event) => {
+                  const video = event.currentTarget;
+                  // 倍速跨集保留：换集后元素是新的，必须重新应用（否则界面写着 0.75× 实际 1×）。
+                  video.playbackRate = speedRef.current;
+                  const pending = restoreRef.current;
+                  if (!pending || pending.vid !== playing.vid) return;
+                  restoreRef.current = null;
+                  video.currentTime = pending.time;
+                  setNotice(`从上次的 ${Math.floor(pending.time)} 秒继续`);
+                }}
+                onPlay={() => {
+                  playedRef.current = playing.vid;
+                }}
                 onTimeUpdate={(event) => {
                   saveProgress(event.currentTarget);
                   // 弹幕只需要每 250ms 一个时间点，避免每次 timeupdate 都重渲染。
@@ -346,7 +443,10 @@ export default function Library() {
                 }}
                 onPause={(event) => saveProgress(event.currentTarget, true)}
                 onEnded={(event) => {
-                  saveProgress(event.currentTarget, true);
+                  endedRef.current = playing.vid;
+                  // 能播到结尾就说明真的播过（不依赖 play 事件是否被拦）。
+                  playedRef.current = playing.vid;
+                  saveProgress(event.currentTarget, true, false, true);
                   if (!autoNextRef.current) return;
                   const index = listRef.current.findIndex((episode) => episode.vid === playingRef.current);
                   const next = listRef.current[index + 1];
@@ -382,7 +482,11 @@ export default function Library() {
                   return next;
                 })
               }
-              onDoubleClick={() => !episode.locked && play.mutate(episode)}
+              onDoubleClick={() => {
+                if (episode.locked || episode.vid === playingRef.current) return;
+                saveBeforeSwitch();
+                play.mutate(episode);
+              }}
               className={[
                 'flex h-10 flex-col items-center justify-center rounded-[var(--radius-control)] border text-[var(--font-size-caption)]',
                 episode.locked

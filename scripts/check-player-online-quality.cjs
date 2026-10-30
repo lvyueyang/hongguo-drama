@@ -62,10 +62,7 @@ if (process.argv[2] !== 'main') {
     assert.equal(third.find(n=>n.type==='video').props.src,'file:///mock-1.mp4'); third.unmount();
   });
 } else {
-  const prefix=fs.readFileSync(path.join(__dirname,'check-download-quality-integration.cjs'),'utf8').split('const checks = [')[0];
-  const module={exports:{}};
-  vm.runInNewContext(prefix+'\nmodule.exports={fixture,dirs};',{module,require,__dirname,console,process,Buffer,URL,Response,Request,Headers,AbortController,setTimeout,clearTimeout});
-  const {fixture,dirs}=module.exports;
+  const {fixture,dirs}=require('./fixtures/download-quality-harness.cjs');
   try {
     await check('episode IPC exposes retry diagnostics and verified quality',async()=>{
       const h=fixture(); h.run("downloadTasks=[{id:'t',hongguoInfo:{series_id:'1',vid:'11',vid_index:1},savePath:'/absent',status:'failed',error:'真实错误',retryAt:123,actualQuality:'1080p'}]; collectSeriesEpisodeFiles=()=>({ordered:[]});");

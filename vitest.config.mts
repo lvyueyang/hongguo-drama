@@ -7,6 +7,9 @@ export default defineConfig({
         test: {
           name: 'node',
           environment: 'node',
+          // 媒体链用例会起真子进程（ffmpeg 替身、worker_threads）并做真实 IO，
+          // 默认 5s 在满负荷并行时会误报超时（实测 62 个 worker 同时跑时偶发）。
+          testTimeout: 20_000,
           include: [
             'packages/*/src/**/*.test.ts',
             'apps/desktop/src/main/**/*.test.ts',

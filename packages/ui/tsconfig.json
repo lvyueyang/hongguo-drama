@@ -4,7 +4,7 @@
     "rootDir": "src",
     "outDir": "dist-types",
     "tsBuildInfoFile": "dist-types/.tsbuildinfo",
-    "types": ["react", "react-dom"],
+    "types": ["react", "react-dom", "node"],
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "jsx": "react-jsx"
   },

@@ -1,12 +1,15 @@
 import { Button } from '@hongguo/ui';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.ts';
 
 /**
  * 悬浮小窗的独立布局（`?floating=1`）。
  *
  * 与主界面刻意隔离：没有导航、没有全局快捷键、窗口内不注册任何 IPC 之外的能力。
- * 它只做三件事：取播放地址 → 播放 → 上报进度；关闭即回到主窗口继续。
+ * 它做四件事：取播放地址 → 续播到上次位置 → 播放 → 上报进度；播完自动接下一集。
+ *
+ * 为什么自己查分集表：进度记录要写真实集号（`vidIndex`），写死 1 会让观看记录、
+ * 续播位置全部错位；顺带也要它才能知道「下一集是谁」。
  */
 export interface FloatingPlayerProps {
   vid: string;
@@ -21,21 +24,69 @@ export interface FloatingPlayerProps {
     duration: number;
     watched: boolean;
   }) => Promise<unknown>;
+  /** 供测试注入；默认 api.seriesEpisodes */
+  loadEpisodes?: (seriesId: string) => Promise<Array<{ vid: string; vid_index: number; locked?: boolean }>>;
+  /** 供测试注入；默认 api.progressGet */
+  readProgress?: (seriesId: string) => Promise<{ vid?: string; currentTime?: number } | null>;
 }
 
-export default function FloatingPlayer({ vid, seriesId, load, save }: FloatingPlayerProps) {
+export default function FloatingPlayer({
+  vid,
+  seriesId,
+  load,
+  save,
+  loadEpisodes,
+  readProgress,
+}: FloatingPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const lastSaved = useRef(0);
+  const resumeRef = useRef<number | null>(null);
+  const [currentVid, setCurrentVid] = useState(vid);
+  const [episodes, setEpisodes] = useState<Array<{ vid: string; vid_index: number; locked?: boolean }>>([]);
   const [url, setUrl] = useState('');
   const [error, setError] = useState('');
 
+  useEffect(() => setCurrentVid(vid), [vid]);
+
+  const index = episodes.findIndex((episode) => episode.vid === currentVid);
+  const episode = index >= 0 ? episodes[index] : undefined;
+  // 分集表还没到时先按 1 记（至少不会写成一个越界值），拿到后立刻用真实集号。
+  const vidIndex = episode?.vid_index ?? (index >= 0 ? index + 1 : 1);
+
+  // 分集表：只为拿到真实集号与下一集；查不到不影响播放。
+  useEffect(() => {
+    if (!seriesId) return;
+    let alive = true;
+    const fetchList =
+      loadEpisodes ??
+      (async (id: string) => {
+        const detail = (await api.seriesEpisodes(id)) as {
+          episodes?: Array<{ vid: string; vid_index: number; locked?: boolean }>;
+        };
+        return detail?.episodes ?? [];
+      });
+    void Promise.resolve()
+      .then(() => fetchList(seriesId))
+      .then((list) => {
+        if (alive && Array.isArray(list)) setEpisodes(list);
+      })
+      .catch(() => {
+        /* 分集表拿不到就退化成「集号 1、不连播」 */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [seriesId, loadEpisodes]);
+
   useEffect(() => {
     let alive = true;
+    setError('');
+    setUrl('');
     const run =
       load ??
       ((targetVid: string, targetSeries: string) =>
         api.playPrepare({ vid: targetVid, seriesId: targetSeries, quality: 'auto' }));
-    void run(vid, seriesId)
+    void run(currentVid, seriesId)
       .then((result) => {
         if (!alive) return;
         if (!result?.url) {
@@ -48,28 +99,56 @@ export default function FloatingPlayer({ vid, seriesId, load, save }: FloatingPl
       .catch((failure: Error) => {
         if (alive) setError(failure.message);
       });
+    // 续播：只有进度属于同一集才用；位置在 loadedmetadata 里落地。
+    const read = readProgress ?? (async (id: string) => (await api.progressGet(id)) as never);
+    void Promise.resolve()
+      .then(() => read(seriesId))
+      .then((saved) => {
+        if (!alive || !saved) return;
+        resumeRef.current =
+          saved.vid === currentVid && Number(saved.currentTime) > 3 ? Number(saved.currentTime) : null;
+      })
+      .catch(() => {
+        /* 读不到进度就从头播 */
+      });
     return () => {
       alive = false;
     };
-  }, [vid, seriesId, load]);
+  }, [currentVid, seriesId, load, readProgress]);
 
-  // 进度上报：节流 5 秒，和小窗外的播放保持一致，避免每帧写盘。
+  const writeProgress = useCallback(
+    (video: HTMLVideoElement, watched: boolean, immediate = false, ended = false): void => {
+      if (!Number.isFinite(video.currentTime)) return;
+      if (!watched && !immediate && Date.now() - lastSaved.current < 5000) return;
+      lastSaved.current = Date.now();
+      const write =
+        save ??
+        ((progress: Parameters<NonNullable<FloatingPlayerProps['save']>>[0]) => api.progressSave(progress));
+      void write({
+        seriesId,
+        vid: currentVid,
+        vidIndex,
+        currentTime: video.currentTime,
+        duration: Number.isFinite(video.duration) ? video.duration : 0,
+        watched,
+        ...(ended ? { ended: true } : {}),
+      } as never);
+    },
+    [currentVid, save, seriesId, vidIndex],
+  );
+
   const report = (watched: boolean): void => {
     const video = videoRef.current;
-    if (!video || !Number.isFinite(video.currentTime)) return;
-    if (!watched && Date.now() - lastSaved.current < 5000) return;
-    lastSaved.current = Date.now();
-    const write =
-      save ??
-      ((progress: Parameters<NonNullable<FloatingPlayerProps['save']>>[0]) => api.progressSave(progress));
-    void write({
-      seriesId,
-      vid,
-      vidIndex: 1,
-      currentTime: video.currentTime,
-      duration: Number.isFinite(video.duration) ? video.duration : 0,
-      watched,
-    });
+    if (video) writeProgress(video, watched);
+  };
+
+  /** 播完：先把这一集写成 watched，再顺延到下一集（锁定的不自动播）。 */
+  const handleEnded = (): void => {
+    const video = videoRef.current;
+    if (video) writeProgress(video, true, true, true);
+    const next = index >= 0 ? episodes[index + 1] : undefined;
+    if (!next || next.locked) return;
+    setCurrentVid(next.vid);
   };
 
   return (
@@ -87,13 +166,19 @@ export default function FloatingPlayer({ vid, seriesId, load, save }: FloatingPl
           autoPlay
           className="min-h-0 flex-1 bg-black"
           aria-label="悬浮小窗播放"
+          onLoadedMetadata={(event) => {
+            const pending = resumeRef.current;
+            if (pending === null) return;
+            resumeRef.current = null;
+            event.currentTarget.currentTime = pending;
+          }}
           onTimeUpdate={() => report(false)}
           onPause={() => report(true)}
-          onEnded={() => report(true)}
+          onEnded={handleEnded}
         />
       )}
       <div className="flex items-center justify-between px-2 py-1 text-[var(--font-size-caption)] text-muted">
-        <span>{url ? '小窗播放中' : '正在准备…'}</span>
+        <span>{url ? `小窗播放中 · 第 ${vidIndex} 集` : '正在准备…'}</span>
         <Button size="sm" variant="ghost" onClick={() => void api.floatClose()}>
           收回主窗口
         </Button>

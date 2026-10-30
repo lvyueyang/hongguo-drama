@@ -6,8 +6,8 @@
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "node scripts/build-worker.mjs && electron-vite dev",
-    "build": "node scripts/build-worker.mjs && electron-vite build && electron-builder --dir",
-    "build:dir": "node scripts/build-worker.mjs && electron-vite build && electron-builder --dir",
+    "build": "electron-vite build && node scripts/build-worker.mjs && electron-builder --dir",
+    "build:dir": "electron-vite build && node scripts/build-worker.mjs && electron-builder --dir",
     "preview": "node scripts/build-worker.mjs && electron-vite preview"
   },
   "dependencies": {

@@ -11,7 +11,10 @@ import {
   collectSeriesTargets,
   collectStorageTargets,
   deleteStorageTargets,
+  episodeDeletionProblem,
+  partitionTargets,
   pruneEmptyDirs,
+  seriesDeletionProblem,
 } from './targets.ts';
 
 const dirs: string[] = [];
@@ -225,5 +228,60 @@ describe('collectEpisodeTargets（单集删除）', () => {
     const outside = write(path.join(tempRoot(), '别人的.mp4'));
     expect(collectEpisodeTargets({ root, savePath: outside }).totalFiles).toBe(0);
     expect(collectEpisodeTargets({ root: '', savePath: outside }).totalFiles).toBe(0);
+  });
+});
+
+/**
+ * 删除前先看运行态（迁移自 4.5 `check-issue43-storage.cjs` 的「在跑就不删」）。
+ * 4.5 在观看记录/单集清理里都守着这条：删掉正在写的那份文件，只会让下载失败得更难看。
+ */
+describe('删除前的运行态守卫', () => {
+  it('正在下载/排队的单集不能删，元数据缺失不拦截', () => {
+    expect(episodeDeletionProblem({ status: 'downloading' })).toMatch(/正在下载/);
+    expect(episodeDeletionProblem({ status: 'pending' })).toMatch(/正在下载/);
+    for (const status of ['completed', 'failed', 'stopped']) {
+      expect(episodeDeletionProblem({ status }), status).toBeNull();
+    }
+    expect(episodeDeletionProblem({})).toBeNull();
+    expect(episodeDeletionProblem(null)).toBeNull();
+  });
+
+  it('整剧删除：只要该剧还有在跑的任务就拦下，并说清有几集', () => {
+    const tasks = [
+      { seriesId: '1', status: 'downloading' },
+      { seriesId: '1', status: 'completed' },
+      { seriesId: '2', status: 'downloading' },
+    ];
+    expect(seriesDeletionProblem(tasks, '1')).toMatch(/还有 1 集在下载/);
+    expect(seriesDeletionProblem(tasks, '2')).toMatch(/还有 1 集在下载/);
+    expect(seriesDeletionProblem(tasks, '3')).toBeNull();
+    expect(seriesDeletionProblem([], '1')).toBeNull();
+    expect(seriesDeletionProblem(undefined, '1')).toBeNull();
+  });
+});
+
+describe('partitionTargets（删除全部时保护正在合并的源文件）', () => {
+  const targets = [
+    { path: '/d/剧A/001.mp4', bytes: 10, group: '剧A' },
+    { path: '/d/剧A/001.mp4.compat.mp4', bytes: 4, group: '剧A' },
+    { path: '/d/剧B/001.mp4', bytes: 10, group: '剧B' },
+  ];
+
+  it('受保护路径不进删除集，其余照删', () => {
+    const { remove, kept } = partitionTargets(targets, ['/d/剧A/001.mp4', '/d/剧A/001.mp4.compat.mp4']);
+    expect(kept.map((item) => item.path)).toEqual(['/d/剧A/001.mp4', '/d/剧A/001.mp4.compat.mp4']);
+    expect(remove.map((item) => item.path)).toEqual(['/d/剧B/001.mp4']);
+  });
+
+  it('路径按解析后比较（多余的 . / .. 段也能对上）', () => {
+    const { kept } = partitionTargets(targets, ['/d/剧A/./../剧A/001.mp4']);
+    expect(kept.map((item) => item.path)).toEqual(['/d/剧A/001.mp4']);
+  });
+
+  it('没有保护项时全删；空输入不崩', () => {
+    expect(partitionTargets(targets, []).remove).toHaveLength(3);
+    expect(partitionTargets(targets, null).remove).toHaveLength(3);
+    expect(partitionTargets([], ['/d/x'])).toEqual({ remove: [], kept: [] });
+    expect(partitionTargets(undefined, undefined)).toEqual({ remove: [], kept: [] });
   });
 });

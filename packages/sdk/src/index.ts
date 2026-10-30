@@ -3,8 +3,17 @@
  */
 export * from './facade.ts';
 export * from './media.ts';
+export { mergeNotificationMarks, planUpdateNotifications } from './services/history/notifications.ts';
 export { refreshWatchHistory, SEQUEL_CHECK_INTERVAL_MS } from './services/history/refresh.ts';
-export { seasonTitle, sourceOf } from './services/history/watch-history.ts';
+export {
+  applyEpisodeUpdate,
+  filterHistory,
+  mergeSequelUpdates,
+  recordPlayback,
+  seasonTitle,
+  sourceOf,
+} from './services/history/watch-history.ts';
+export { resetTranscodeJobs } from './services/media/transcode.ts';
 export { createAnnouncementService } from './services/meta/announcements.ts';
 export { availableRelease, updatesEnabled } from './services/meta/update.ts';
 export { createUpdateInstaller } from './services/meta/update-installer.ts';
@@ -15,5 +24,8 @@ export {
   collectSeriesTargets,
   collectStorageTargets,
   deleteStorageTargets,
+  episodeDeletionProblem,
+  partitionTargets,
   pruneEmptyDirs,
+  seriesDeletionProblem,
 } from './services/storage/targets.ts';

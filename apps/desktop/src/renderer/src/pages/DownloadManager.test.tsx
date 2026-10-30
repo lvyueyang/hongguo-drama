@@ -1,7 +1,7 @@
 import { Events } from '@hongguo/contract';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import DownloadManager from './DownloadManager.tsx';
 
 const tasks = [
@@ -32,7 +32,15 @@ const tasks = [
   },
 ];
 
+type Listener = (payload: unknown) => void;
+const listeners: Record<string, Listener> = {};
+
+function emit(event: string, payload: unknown): void {
+  listeners[event]?.(payload);
+}
+
 function installApi(overrides: Record<string, unknown> = {}) {
+  for (const key of Object.keys(listeners)) delete listeners[key];
   const api = {
     downloadList: vi.fn(async () => ({ ok: true, data: tasks })),
     downloadPause: vi.fn(async () => ({ ok: true, data: {} })),
@@ -42,8 +50,18 @@ function installApi(overrides: Record<string, unknown> = {}) {
       ok: true,
       data: { seriesId: '9001', outputPath: '/tmp/out.mp4', count: 2 },
     })),
+    mergeCancel: vi.fn(async () => ({ ok: true, data: { cancelled: true } })),
     transcode: vi.fn(async () => ({ ok: true, data: { url: 'hongguo-local://f/x', cached: false } })),
-    on: vi.fn(() => () => {}),
+    storageDeleteSeries: vi.fn(async () => ({
+      ok: true,
+      data: { deleted: 1, bytes: 1024, failed: [], removedDirs: 1 },
+    })),
+    on: vi.fn((event: string, listener: Listener) => {
+      listeners[event] = listener;
+      return () => {
+        delete listeners[event];
+      };
+    }),
     ...overrides,
   };
   // 只挂 api，不要替换 window（替换会破坏 jsdom 的 document 绑定）
@@ -65,6 +83,9 @@ describe('下载管理页（React 19 + Testing Library + jsdom）', () => {
     installApi();
   });
 
+  // vitest 未开 globals，RTL 不会自动清理；不清理会让下一次 render 与上一次的 DOM 重名。
+  afterEach(() => cleanup());
+
   it('按队列状态渲染，并显示实际清晰度', async () => {
     renderPage();
     await waitFor(() => expect(screen.getByText(/第 1001 集/)).toBeTruthy());
@@ -73,14 +94,21 @@ describe('下载管理页（React 19 + Testing Library + jsdom）', () => {
     expect(screen.getByText(/实际 1080p/)).toBeTruthy();
   });
 
-  it('订阅进度与合并事件，合并完成后给出提示', async () => {
+  it('订阅进度、合并、转码与存储错误事件（少订阅=界面看着像卡死）', async () => {
     const api = installApi();
     renderPage();
     await waitFor(() => expect(api.on).toHaveBeenCalled());
     const subscribed = api.on.mock.calls.map((call: unknown[]) => call[0]);
-    expect(subscribed).toContain(Events.downloadProgress);
-    expect(subscribed).toContain(Events.downloadState);
-    expect(subscribed).toContain(Events.mergeState);
+    for (const event of [
+      Events.downloadProgress,
+      Events.downloadState,
+      Events.mergeState,
+      Events.mergeProgress,
+      Events.transcodeProgress,
+      Events.storageError,
+    ]) {
+      expect(subscribed, event).toContain(event);
+    }
   });
 
   it('暂停按钮把任务 id 交给主进程', async () => {
@@ -97,5 +125,73 @@ describe('下载管理页（React 19 + Testing Library + jsdom）', () => {
     });
     renderPage();
     await waitFor(() => expect(screen.getByText(/读取队列失败|还没有下载任务/)).toBeTruthy());
+  });
+
+  it('三种合并方式分别把 compatible / require1080 传给主进程', async () => {
+    const api = installApi();
+    renderPage();
+    const fast = await screen.findByText('快速合并');
+    fast.click();
+    await waitFor(() =>
+      expect(api.mergeStart).toHaveBeenLastCalledWith({
+        seriesId: '9001',
+        compatible: false,
+        require1080: false,
+      }),
+    );
+
+    screen.getByText('兼容合并').click();
+    await waitFor(() =>
+      expect(api.mergeStart).toHaveBeenLastCalledWith({
+        seriesId: '9001',
+        compatible: true,
+        require1080: false,
+      }),
+    );
+
+    screen.getByText('仅 1080P').click();
+    await waitFor(() =>
+      expect(api.mergeStart).toHaveBeenLastCalledWith({
+        seriesId: '9001',
+        compatible: false,
+        require1080: true,
+      }),
+    );
+  });
+
+  it('合并进度事件驱动进度条，合并可以取消', async () => {
+    const api = installApi();
+    renderPage();
+    await waitFor(() => expect(listeners[Events.mergeProgress]).toBeTruthy());
+
+    emit(Events.mergeState, { seriesId: '9001', status: 'running' });
+    emit(Events.mergeProgress, {
+      seriesId: '9001',
+      stage: 'preparing',
+      stageText: '统一视频编码',
+      progress: 37,
+    });
+    await waitFor(() => expect(screen.getByText(/统一视频编码 · 37%/)).toBeTruthy());
+
+    const cancel = screen.getByText('取消合并');
+    cancel.click();
+    await waitFor(() => expect(api.mergeCancel).toHaveBeenCalledWith('9001'));
+
+    // 结束后进度与取消按钮一起消失
+    emit(Events.mergeState, { seriesId: '9001', status: 'completed', outputPath: '/tmp/out.mp4' });
+    await waitFor(() => expect(screen.queryByText('取消合并')).toBeNull());
+    expect(screen.getByText(/合并完成/)).toBeTruthy();
+  });
+
+  it('转码进度与存储写失败都看得见', async () => {
+    installApi({ transcode: vi.fn(async () => new Promise(() => {})) });
+    renderPage();
+    const transcode = await screen.findByText('转码兜底');
+    transcode.click();
+    emit(Events.transcodeProgress, { taskId: 'task-a', percent: 66 });
+    await waitFor(() => expect(screen.getByText(/转码 66%/)).toBeTruthy());
+
+    emit(Events.storageError, { error: '磁盘已满' });
+    await waitFor(() => expect(screen.getByText(/本地数据保存失败：磁盘已满/)).toBeTruthy());
   });
 });

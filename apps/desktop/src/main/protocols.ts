@@ -46,14 +46,18 @@ export function registerProtocols({ sessions, mediaAccess }: ProtocolDeps): void
     const session: MediaSession | undefined = sessions.get(url.pathname.replace(/^\/+/, ''));
     if (!session) return new Response('not ready', { status: 404 });
     try {
-      const chunk = await session.read(request.headers.get('range') ?? undefined);
+      const chunk = await session.read(request.headers.get('range') ?? undefined, {
+        method: request.method,
+      });
       if (request.method === 'HEAD') {
         return new Response(null, { status: chunk.status, headers: mediaHeaders(chunk.headers) });
       }
-      return new Response(Readable.toWeb(Readable.from([chunk.body])) as ReadableStream, {
-        status: chunk.status,
-        headers: mediaHeaders(chunk.headers),
-      });
+      // 明文片源是流（边下边给），加密/HLS 片源是内存或文件切片，两种都要能交给 Response。
+      const body =
+        chunk.body instanceof Readable
+          ? (Readable.toWeb(chunk.body) as ReadableStream)
+          : (Readable.toWeb(Readable.from([chunk.body])) as ReadableStream);
+      return new Response(body, { status: chunk.status, headers: mediaHeaders(chunk.headers) });
     } catch (error) {
       const message = (error as Error).message || '读取片源失败';
       return new Response(message, { status: 502, headers: mediaHeaders({ 'Content-Type': 'text/plain' }) });

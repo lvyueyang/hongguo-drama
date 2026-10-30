@@ -12,6 +12,11 @@ export type NavigationDecision = 'allow' | 'external' | 'block';
 export interface NavigationContext {
   /** 允许在应用窗口内加载的来源（开发服务器与打包后的 file 页面） */
   appOrigins: string[];
+  /**
+   * 允许的本地页面入口（打包后是 out/renderer/index.html）。
+   * 只放行名单内的 file: 地址：任意本地文件（用户下载的 HTML、挂载的网盘页面）都不算应用自身。
+   */
+  appFiles?: string[];
 }
 
 /** 判断某个 URL 是否属于应用自身（含 file 协议与空来源）。 */
@@ -22,9 +27,17 @@ export function isAppUrl(target: string, context: NavigationContext): boolean {
   } catch {
     return false;
   }
-  // 只认 file: 与显式列出的应用来源；不要放行 origin === 'null'——
+  // 只认名单内的本地入口与显式列出的应用来源；不要放行 origin === 'null'——
   // javascript:/data: 这类 URL 的 origin 也是 'null'，放行等于把脚本注入当自家页面。
-  if (url.protocol === 'file:') return true;
+  if (url.protocol === 'file:') {
+    const allowed = context.appFiles ?? [];
+    if (!allowed.length) return false;
+    const target = decodeURIComponent(url.pathname).replace(/\\/g, '/');
+    return allowed.some((file) => {
+      const entry = String(file).replace(/\\/g, '/');
+      return target === entry || target.endsWith(entry);
+    });
+  }
   return context.appOrigins.includes(url.origin);
 }
 
@@ -45,8 +58,45 @@ export function decideNavigation(target: string, context: NavigationContext): Na
   return 'block';
 }
 
-/** 播放/下载都不需要敏感权限：一律拒绝，避免误授权。 */
-export function decidePermission(permission: string): boolean {
-  void permission;
-  return false;
+/**
+ * 权限策略（与 4.5 `main.js` 的 `web-contents-created` 处理一致）：
+ * - 只有**可信主 frame**（应用自己的页面 + 主窗口）才能拿全屏与剪贴板；
+ * - 摄像头/麦克风/定位/通知这些一律不授权，无论请求来自哪里。
+ *
+ * 为什么必须放行这三项：播放器「切换全屏」快捷键走的是 `requestFullscreen()`，
+ * 复制分享链接/粘贴分享链接用剪贴板；一律拒绝等于把这三个功能默默弄坏（页面只能静默失败）。
+ */
+export const TRUSTED_PERMISSIONS = ['fullscreen', 'clipboard-read', 'clipboard-sanitized-write'] as const;
+
+export interface PermissionContext {
+  /** 请求是否来自应用自己的主 frame */
+  trusted: boolean;
 }
+
+/** 除上面三项之外一律拒绝，包括未知权限（宁缺勿滥）。 */
+export function decidePermission(
+  permission: string,
+  context: PermissionContext = { trusted: false },
+): boolean {
+  if (context.trusted !== true) return false;
+  return (TRUSTED_PERMISSIONS as readonly string[]).includes(permission);
+}
+
+/** 权限请求是否来自应用自己的主 frame（子 frame、外部地址、拿不到详情都不算）。 */
+export function isTrustedPermissionRequest(
+  details: { isMainFrame?: boolean; requestingUrl?: string } | null | undefined,
+  context: NavigationContext,
+): boolean {
+  if (!details || details.isMainFrame !== true) return false;
+  const target = String(details.requestingUrl ?? '');
+  if (!target) return false;
+  return decideNavigation(target, context) === 'allow';
+}
+
+export default {
+  decideNavigation,
+  decidePermission,
+  isAppUrl,
+  isTrustedPermissionRequest,
+  TRUSTED_PERMISSIONS,
+};

@@ -36,6 +36,8 @@ function listHistory(series, playback, showSequels = true) {
         completed: total > 0 && Number.isInteger(record.completedEpisode) && record.completedEpisode >= total,
         vid_index: record.vid_index,
         currentTime: record.currentTime,
+        // 时长必须带出来：界面要显示「30s / 100s」，筛选也要靠它判断是否看完。
+        duration: Number(record.duration) || 0,
         updatedAt: record.updatedAt,
         unreadEpisodes: record.unreadEpisodes || 0,
         sequels,
@@ -50,6 +52,56 @@ function listHistory(series, playback, showSequels = true) {
       };
     })
     .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export type HistoryScope = 'all' | 'latest' | 'unfinished' | 'skip-completed-low';
+
+/**
+ * 观看记录的范围筛选（迁移自 4.5 历史页的三个筛选 + 「跳过已看完的低季」）。
+ *
+ * 两个要点：
+ * - 「每剧最近」= 丢掉同一家族里还有更高季的行 —— 按剧号去重是空操作（每行剧号本来就唯一）；
+ * - 「未看完」与「跳过已看完」都依赖 `completed`（来自 recordPlayback 的完成证据）与 `duration`。
+ */
+function filterHistory(rows, scope: HistoryScope = 'all') {
+  const list = Array.isArray(rows) ? rows : [];
+  if (scope === 'latest') return list.filter((row) => row?.hasHigherSeason !== true);
+  if (scope === 'unfinished')
+    return list.filter((row) => {
+      if (row?.completed === true) return false;
+      const current = Number(row?.currentTime) || 0;
+      const duration = Number(row?.duration) || 0;
+      // 没有时长就无法判断进度：按「未看完」保留，宁可多显示也不要漏。
+      return !duration || current < duration * 0.95;
+    });
+  if (scope === 'skip-completed-low')
+    return list.filter((row) => !(row?.completed === true && row?.hasHigherSeason === true));
+  return list;
+}
+
+/**
+ * 续作刷新结果的写回：把「续作/总量/检查点」合并进**当前**记录。
+ *
+ * 两个必须守住的点：
+ * - 合并前要重新读一次播放记录——刷新是 10 秒级的网络操作，期间用户可能刚存了进度，
+ *   整条覆盖会把 `vid_index/currentTime` 退回旧值（4.5 的 check 专门追这个回归）；
+ * - 刷新期间被移除的记录不许复活。
+ */
+function mergeSequelUpdates(current, updates) {
+  const merged = { ...(current ?? {}) };
+  for (const [seriesId, update] of Object.entries(updates ?? {})) {
+    const record = merged[seriesId];
+    if (!record) continue;
+    const fresh = update as Record<string, any>;
+    merged[seriesId] = {
+      ...record,
+      sequels: fresh.sequels ?? record.sequels,
+      knownTotal: Math.max(Number(record.knownTotal) || 0, Number(fresh.knownTotal) || 0),
+      lastCheckedAt: fresh.lastCheckedAt ?? record.lastCheckedAt,
+      lastCheckError: fresh.lastCheckError ?? '',
+    };
+  }
+  return merged;
 }
 
 function recordPlayback(previous, series, index, time, now = Date.now(), metadata: any = {}) {
@@ -199,6 +251,8 @@ function acknowledge(record, snapshot) {
 }
 
 export default {
+  filterHistory,
+  mergeSequelUpdates,
   listHistory,
   recordPlayback,
   applyEpisodeUpdate,
@@ -214,8 +268,10 @@ export {
   acknowledge,
   applyEpisodeUpdate,
   familyKey,
+  filterHistory,
   findSequels,
   listHistory,
+  mergeSequelUpdates,
   recordPlayback,
   seasonOf,
   seasonTitle,

@@ -177,7 +177,7 @@ async function mount(file, api, props = {}, storage = null) {
     }
   });
   await test('catalog integration page failure keeps actual page and retries without skipping', async () => {
-    const { fixture, categoryPayload } = require('../../scripts/check-app-catalog.cjs');
+    const { fixture, categoryPayload } = require('../../scripts/fixtures/app-catalog.cjs');
     for (const action of ['重试', '下一页']) {
       let failSecond = true;
       const requests = [];
@@ -225,7 +225,7 @@ async function mount(file, api, props = {}, storage = null) {
     web.unmount();
   });
   await test('catalog integration expired cursor keeps actual page and offers bounded first-page recovery', async () => {
-    const { fixture, categoryPayload } = require('../../scripts/check-app-catalog.cjs');
+    const { fixture, categoryPayload } = require('../../scripts/fixtures/app-catalog.cjs');
     for (const action of ['重试', '刷新片单']) {
       const h = fixture(call => categoryPayload('7000001', call.body.offset + 15));
       const ui = await mount('Browse', { getSeriesList: async () => [], browseCategories: async () => [], browseList: h.browse }); await ui.flush();
@@ -259,7 +259,7 @@ async function mount(file, api, props = {}, storage = null) {
     }
   });
   await test('catalog integration feed refresh preserves inactive Browse third page', async () => {
-    const { fixture, categoryPayload, rankPayload } = require('../../scripts/check-app-catalog.cjs');
+    const { fixture, categoryPayload, rankPayload } = require('../../scripts/fixtures/app-catalog.cjs');
     const h = fixture(call => {
       if (call.body) return categoryPayload();
       const offset = Number(call.values.offset || 0), p = rankPayload('hot-drama'); p.data.next_offset = offset + 20;
@@ -278,7 +278,7 @@ async function mount(file, api, props = {}, storage = null) {
     assert.ok(browse.text().includes('第 4 页')); assert.ok(browse.text().includes('游标60榜单')); browse.unmount(); feed.unmount();
   });
   await test('catalog integration failed forced refresh blocks stale cursor navigation until retry', async () => {
-    const { fixture, categoryPayload } = require('../../scripts/check-app-catalog.cjs');
+    const { fixture, categoryPayload } = require('../../scripts/fixtures/app-catalog.cjs');
     let failRefresh = false;
     const h = fixture(call => {
       if (failRefresh) { failRefresh = false; throw Object.assign(new Error('fixture'), { code: 'ECONNRESET' }); }
@@ -295,7 +295,7 @@ async function mount(file, api, props = {}, storage = null) {
     ui.button('下一页').props.onClick(); await ui.flush(); assert.ok(ui.text().includes('第 2 页')); ui.unmount();
   });
   for (const scenario of ['new-genre', 'expired-back']) await test(`catalog integration first-page failure isolates old pagination: ${scenario}`, async () => {
-    const { fixture, categoryPayload } = require('../../scripts/check-app-catalog.cjs');
+    const { fixture, categoryPayload } = require('../../scripts/fixtures/app-catalog.cjs');
     const requests = []; let failNext = false;
     const h = fixture(call => {
       if (failNext) { failNext = false; throw Object.assign(new Error('fixture'), { code: 'ECONNRESET' }); }
@@ -341,7 +341,7 @@ async function mount(file, api, props = {}, storage = null) {
     next().props.onClick(); await ui.flush(); assert.equal(requests.at(-1).page, 2); ui.unmount();
   });
   await test('catalog integration feed renders App description', async () => {
-    const { fixture, rankPayload } = require('../../scripts/check-app-catalog.cjs');
+    const { fixture, rankPayload } = require('../../scripts/fixtures/app-catalog.cjs');
     const h = fixture(() => rankPayload('hot-drama'));
     const ui = await mount('DramaFeed', { browseList: h.browse }); await ui.flush();
     assert.ok(ui.text().includes('完整简介')); ui.unmount();
@@ -496,7 +496,7 @@ async function mount(file, api, props = {}, storage = null) {
     assert.ok(!ui.text().includes('官网缓存片单')); assert.ok(!ui.text().includes('官网本次失败')); ui.unmount();
   });
   await test('feed channel repeated App refresh reuses the existing in-flight transport', async () => {
-    const { fixture, rankPayload } = require('../../scripts/check-app-catalog.cjs');
+    const { fixture, rankPayload } = require('../../scripts/fixtures/app-catalog.cjs');
     const pending = deferred();
     const h = fixture((_call, count) => count === 1 ? rankPayload('hot-drama') : pending.promise);
     const ui = await mount('DramaFeed', { browseList: h.browse }); await ui.flush();
@@ -913,7 +913,7 @@ async function mount(file, api, props = {}, storage = null) {
     ui.unmount();
   });
   await test('browse category batches wrap at the end and retry failed cursors without skipping', async () => {
-    const { fixture, categoryPayload } = require('../../scripts/check-app-catalog.cjs');
+    const { fixture, categoryPayload } = require('../../scripts/fixtures/app-catalog.cjs');
     let fail = true;
     const h = fixture(call => {
       if (call.body.offset === 15 && fail) { fail = false; throw Object.assign(new Error('fixture'), { code: 'ECONNRESET' }); }
@@ -941,7 +941,7 @@ async function mount(file, api, props = {}, storage = null) {
     ui.unmount();
   });
   await test('browse change batch follows real App cursors without repeating the fixed first page', async () => {
-    const { fixture, categoryPayload } = require('../../scripts/check-app-catalog.cjs');
+    const { fixture, categoryPayload } = require('../../scripts/fixtures/app-catalog.cjs');
     let fail = false;
     const h = fixture(call => {
       if (fail) throw Object.assign(new Error('fixture reset'), { code: 'ECONNRESET' });
@@ -999,7 +999,7 @@ async function mount(file, api, props = {}, storage = null) {
     ui.unmount();
   });
   await test('browse forced catalog refresh reports recovery and isolates stale results', async () => {
-    const { fixture, categoryPayload, rankPayload } = require('../../scripts/check-app-catalog.cjs');
+    const { fixture, categoryPayload, rankPayload } = require('../../scripts/fixtures/app-catalog.cjs');
     let mode = 'ok', resolveLate;
     const rankPage = call => {
       const payload = rankPayload('hot-drama');

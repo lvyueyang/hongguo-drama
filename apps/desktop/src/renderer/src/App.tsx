@@ -1,5 +1,6 @@
 import { Button, cn } from '@hongguo/ui';
 import { useState } from 'react';
+import { AnnouncementBanner } from './components/AnnouncementBanner.tsx';
 import Account from './pages/Account.tsx';
 import Calendar from './pages/Calendar.tsx';
 import Discover from './pages/Discover.tsx';
@@ -100,7 +101,13 @@ function MainWindow() {
             </Button>
           </div>
         </header>
-        <section className="min-h-0 flex-1">{current.render()}</section>
+        <section className="flex min-h-0 flex-1 flex-col">
+          {/* 紧急公告横幅：主进程推来才出现，任何页面都能看到；没有公告时不占高度。 */}
+          <div className="empty:hidden px-4 pt-3">
+            <AnnouncementBanner />
+          </div>
+          <div className="min-h-0 flex-1">{current.render()}</div>
+        </section>
       </main>
     </div>
   );

@@ -33,10 +33,17 @@ out/
 npm-debug.log*
 yarn-debug.log*
 *.tmp
-.cache/
+*.cache/
 .npm-cache/
 .electron-cache/
 .eb-cache/
+
+# 5.0 打包产物（electron-builder 的 directories.output）
+/dist-5.0/
+/web-5.0/
+
+# Windows 版 FFmpeg 下载缓存（setup-ffmpeg.js 会落在 build/ 下）
+build/ffmpeg-essentials.zip
 
 # 本地配置
 config.json
@@ -80,7 +87,9 @@ dist-signed/
 
 # Windows build records
 WINDOWS_HANDOFF.md
-media/
+# 只能锚定到仓库根的 media/：裸 media/ 会连带忽略任何名为 media 的源码目录
+# （曾吞掉 packages/sdk/src/services/media/**，导致媒体层从未进入版本库）。
+/media/
 
 # Local release and preview material
 verification/

@@ -13,6 +13,7 @@ import { attempt, ErrorCodes, type Result, SdkError } from '@hongguo/shared';
 import customProvider from './providers/custom/index.ts';
 import hemaProvider from './providers/hema/index.ts';
 import { browseList as browseAppCatalog } from './providers/hongguo-app/catalog.ts';
+import { searchNewReleasesDetailed } from './providers/hongguo-app/new-releases.ts';
 import { searchApp } from './providers/hongguo-app/search.ts';
 import { createAccountService } from './providers/hongguo-passport/account.ts';
 import { browseList as browseWebCatalog, setNetTransport } from './providers/hongguo-web/catalog.ts';
@@ -39,7 +40,9 @@ import { listHistory } from './services/history/watch-history.ts';
 import { remuxHls } from './services/media/hls.ts';
 import { buildMergePlan, readMergeInfo } from './services/media/merge-plan.ts';
 import { meetsDownloadQuality, normalizeDownloadQuality } from './services/media/quality.ts';
+import { searchSeriesWithFallback } from './services/search/orchestrate.ts';
 import { findSeriesSequels, searchSeries } from './services/search/series-search.ts';
+import { listCustomSources, saveCustomSource } from './services/sources/custom-store.ts';
 import { getMediaSources, setBuiltinSourceEnabled } from './services/sources/media-sources.ts';
 import {
   applyPortableDataDir,
@@ -106,6 +109,7 @@ export interface Sdk {
       options?: { source?: string; page?: number; deadline?: number },
     ): Promise<unknown>;
     app(keyword: string, options?: unknown): Promise<unknown>;
+    series2(keyword: string, options?: Record<string, any>): Promise<unknown>;
     series(keyword: string, search: unknown, known?: unknown[], options?: unknown): Promise<unknown>;
     sequels(entry: unknown, registry: unknown[], search: unknown, options?: unknown): Promise<unknown>;
   };
@@ -124,6 +128,11 @@ export interface Sdk {
     web(options?: any, proxyLogin?: unknown): Promise<unknown>;
     sources(): unknown;
     setSourceEnabled(id: string, enabled: boolean): unknown;
+    /** 放弃某个自定义源的在飞请求（来源被停用时用） */
+    cancelRequests(id: string): void;
+    /** 自定义源清单与增删改 */
+    customSources(): unknown;
+    saveCustomSource(request: unknown): Promise<unknown>;
   };
   series: {
     resolve(input: unknown): Promise<unknown>;
@@ -202,6 +211,17 @@ export function createSdk(config: SdkConfig = {}): Sdk {
         return searchHongguo(kw, { page, ...(deadline ? { deadline } : {}) } as never);
       },
       app: (keyword, options) => searchApp(keyword as string, (options ?? {}) as any),
+      /**
+       * 红果主搜索链路：App 优先 → 官网兜底 → 5xx 用 App 救场 → 首页补一次今日上新。
+       * 依赖全部注入，宿主只负责传设置与预算。
+       */
+      series2: (keyword: unknown, options: Record<string, any> = {}) =>
+        searchSeriesWithFallback(String(keyword ?? '').trim(), options as never, {
+          isAppEnabled: () => store.getSettings().search_app_enabled !== false,
+          app: (kw, opts) => searchApp(kw, opts as never),
+          web: (kw, opts) => searchHongguo(kw, opts as never),
+          newReleases: (kw, opts) => searchNewReleasesDetailed(kw, opts as never),
+        }),
       series: (keyword, search, known, options) =>
         searchSeries(keyword as string, search as any, (known ?? []) as any, (options ?? {}) as any),
       sequels: (entry, registry, search, options) =>
@@ -245,6 +265,10 @@ export function createSdk(config: SdkConfig = {}): Sdk {
       web: (options, proxyLogin) => browseWebCatalog((options ?? {}) as any, proxyLogin as any),
       sources: () => getMediaSources(store.getSettings()),
       setSourceEnabled: (id, enabled) => setBuiltinSourceEnabled(store.getSettings(), id, enabled),
+      /** 放弃某个自定义源的在飞请求（来源被停用时要用，否则停用只对新请求生效）。 */
+      cancelRequests: (id: string) => customProvider.cancelRequests(id),
+      customSources: () => listCustomSources(store.getSettings()),
+      saveCustomSource: (request) => saveCustomSource(store, (request ?? {}) as never),
     },
 
     series: {

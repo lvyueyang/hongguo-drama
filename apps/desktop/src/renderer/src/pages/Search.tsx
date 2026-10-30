@@ -28,6 +28,27 @@ function pickResults(payload: unknown): SearchRow[] {
   return Array.isArray(value?.results) ? (value.results as SearchRow[]) : [];
 }
 
+/** 结果来源说明：走了兜底线路、补搜到今日上新、官网失败原因都如实告诉用户。 */
+function resultNotice(payload: unknown): string {
+  const value = payload as
+    | {
+        channel?: string;
+        partial?: boolean;
+        appError?: string;
+        apiError?: string;
+        meta?: { newRelease?: number };
+      }
+    | null
+    | undefined;
+  if (!value) return '';
+  const parts: string[] = [];
+  if (value.channel === 'app') parts.push('来自 App 搜索');
+  if (value.partial && value.apiError) parts.push(`官网暂不可用（${value.apiError}），已改用 App`);
+  else if (value.appError) parts.push(`App 搜索不可用，已改用官网`);
+  if (Number(value.meta?.newRelease) > 0) parts.push(`含 ${value.meta?.newRelease} 部今日上新`);
+  return parts.join(' · ');
+}
+
 export default function Search() {
   const [keyword, setKeyword] = useState('');
   const [submitted, setSubmitted] = useState('');
@@ -62,6 +83,7 @@ export default function Search() {
 
   const items = useMemo(() => suggestions.data ?? [], [suggestions.data]);
   const rows = pickResults(results.data);
+  const notice = resultNotice(results.data);
 
   const runSearch = (value: string): void => {
     const next = value.trim();
@@ -168,6 +190,9 @@ export default function Search() {
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-3 overflow-y-auto md:grid-cols-3 xl:grid-cols-5">
+          {notice && (
+            <p className="col-span-full text-[var(--font-size-caption)] text-secondary-text">{notice}</p>
+          )}
           {rows.map((row) => (
             <Card key={String(row.series_id)} className="overflow-hidden">
               <div className="aspect-[3/4] w-full bg-selection">

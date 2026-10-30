@@ -308,7 +308,7 @@ async function fetchCatalogPage(url, signal, proxyLogin, allowTrustedDns, parse)
     controller.abort();
   }
 }
-async function browseList(options: any = {}, proxyLogin) {
+async function browseList(options: any = {}, proxyLogin: unknown = null) {
   const { category = 'real-drama', genre = '', page = 1, forceRefresh = false } = options || {};
   const ranking = RANKINGS.has(category);
   if ((!CATEGORIES.has(category) && !ranking) || (genre && (!/^[a-z0-9-]+$/.test(genre) || ranking)))
