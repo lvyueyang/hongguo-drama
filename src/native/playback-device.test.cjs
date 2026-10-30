@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Offline protocol checks for playback-device.js; all responses and identities are synthetic.
 const assert = require('node:assert/strict');
 const test = require('node:test');

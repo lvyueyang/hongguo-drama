@@ -1,0 +1,75 @@
+{
+  "_source": "GET https://hongguoduanju.com/api/search/suggestion/?query=修仙",
+  "_capturedAt": "2026-10-29",
+  "suggestionList": [
+    {
+      "name": "修仙被淘汰，重生都市大爽特爽第一季",
+      "keyword": "7698612485254810686",
+      "word_type": "short_play_name",
+      "display_words": ["修仙", "被淘汰，重生都市大爽特爽第一季"],
+      "video_data": {
+        "series_id": "7698612485254810686",
+        "episode_cnt": 182,
+        "create_time": "1792472900",
+        "series_status": 1,
+        "pay_type": 0,
+        "series_title": "修仙被淘汰，重生都市大爽特爽第一季",
+        "series_intro": "赵凡苦修八百年遭七大宗门接连淘汰，带着元婴二层修为重回地球车祸前夜。",
+        "series_cover": "https://p6-novel.byteimg.com/novel-pic/3b50b9c46b1e8b12b695aa0a83526bb8~tplv-shrink:640:0.image",
+        "episode_right_text": "全182集",
+        "vid_list": ["7698612493093964824", "7698612493135907864", "7698612494243204120"],
+        "hot_score_data": {
+          "score": 52751311,
+          "text": "5275万热度"
+        },
+        "category_list": [
+          {
+            "category_id": "7",
+            "name": "玄幻"
+          },
+          {
+            "category_id": "36",
+            "name": "重生"
+          },
+          {
+            "category_id": "1",
+            "name": "都市"
+          }
+        ],
+        "celebrities": []
+      }
+    },
+    {
+      "name": "修仙系列",
+      "keyword": "1_38c9d9149ee13c3f1ce49edd79bee196",
+      "word_type": "common_query",
+      "display_words": ["修仙系列"],
+      "video_data": {}
+    },
+    {
+      "name": "HEIC 封面样例",
+      "keyword": "7697209252699442201",
+      "word_type": "short_play_name",
+      "display_words": ["修仙满级回现代"],
+      "video_data": {
+        "series_id": "7697209252699442201",
+        "episode_cnt": 110,
+        "series_title": "修仙满级回现代，我让全家横着走",
+        "series_intro": "凌霄修仙两万年后重返蓝星。",
+        "series_cover": "https://p6-novel-sign.fqnovelpic.com/novel-pic/abc123~tplv-shrink:640:0.heic",
+        "episode_right_text": "全110集",
+        "vid_list": ["7697250015634279448"],
+        "hot_score_data": {
+          "score": 59787653,
+          "text": "5978万热度"
+        },
+        "category_list": [],
+        "celebrities": [
+          {
+            "name": "张三"
+          }
+        ]
+      }
+    }
+  ]
+}

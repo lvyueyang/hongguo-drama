@@ -21,10 +21,17 @@ for (const flags of [{ prerelease: true }, { draft: true }]) {
   assert.equal(availableRelease({ tag_name: 'v2.0', ...flags }, '1.75.0'), null);
 }
 const pkg = require('../package.json');
-const lock = require('../package-lock.json');
-assert.equal(pkg.version, '4.5.0', 'Current source release target must be 4.5.0');
-assert.equal(lock.version, pkg.version, 'Lockfile version must match the release');
-assert.equal(lock.packages[''].version, pkg.version, 'Lockfile root package must match the release');
+// 5.0 起依赖由 pnpm workspace 管理：npm lockfile 已移除，版本由 workspace 各包保持一致来保证。
+const workspacePackages = require('node:fs').readdirSync(require('node:path').resolve(__dirname, '../packages'));
+// 5.0 破坏性重构：版本目标随 dev 分支升到 5.0.0。
+assert.equal(pkg.version, '5.0.0', 'Current source release target must be 5.0.0');
+assert.ok(workspacePackages.length >= 6, 'workspace packages must exist');
+for (const name of workspacePackages) {
+  const manifest = require(`../packages/${name}/package.json`);
+  assert.equal(manifest.version, pkg.version, `Workspace package ${name} must match the release`);
+}
+const appManifest = require('../apps/desktop/package.json');
+assert.equal(appManifest.version, pkg.version, 'Desktop app version must match the release');
 assert.match(pkg.version, /^\d+\.\d+\.0$/, 'Release versions use two public components and an internal zero patch');
 const publicVersion = pkg.version.replace(/\.0$/, '');
 assert.equal(availableRelease({ tag_name: 'v2.0' }, '1.80.0').version, '2.0');

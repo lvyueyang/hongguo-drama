@@ -95,3 +95,12 @@ venv/
 __pycache__/
 *.pyc
 backups/
+# ===== 5.0 重构：workspace 产物 =====
+dist-types/
+*.tsbuildinfo
+fixtures/media/
+fixtures/**/raw/
+
+# ===== Playwright 产物 =====
+test-results/
+playwright-report/

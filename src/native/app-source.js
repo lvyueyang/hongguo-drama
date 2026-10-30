@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Signing and Spade algorithms adapted from woshishiq1/drpys
 // commit 22261adfa31435e3b3ef5a730b8a2a75bcaf1715, spider/js/红果果[短].js,
 // via N3urda/hongguoTV eea73e6a45569a2cbbb9440f7cd5290c459b0b70.

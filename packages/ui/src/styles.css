@@ -1,0 +1,107 @@
+/**
+ * 设计 token（来自 DESIGN.md）：Tailwind v4 的 CSS-first 配置。
+ * 颜色在这里定义一次，组件只引用语义名（bg-surface / text-muted 等）。
+ */
+@import "tailwindcss";
+@import "tw-animate-css";
+
+:root {
+  --canvas: #faf9f7;
+  --sidebar: #f0eeeb;
+  --surface: #ffffff;
+  --text-primary: #252523;
+  --text-secondary: #686661;
+  --text-muted: #77736c;
+  --accent: #c8383d;
+  --accent-hover: #ae2b31;
+  --selection: #fae9e7;
+  --success: #33745c;
+  --danger: #ba3438;
+  --border: #e4e1dc;
+
+  --radius-control: 8px;
+  --radius-poster: 12px;
+  --radius-sheet: 16px;
+
+  --sidebar-width: 214px;
+  --toolbar-height: 48px;
+  --traffic-light-inset: 58px;
+}
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-sidebar: var(--sidebar);
+  --color-surface: var(--surface);
+  --color-primary-text: var(--text-primary);
+  --color-secondary-text: var(--text-secondary);
+  --color-muted: var(--text-muted);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-selection: var(--selection);
+  --color-success: var(--success);
+  --color-danger: var(--danger);
+  --color-border-subtle: var(--border);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-size-body: 13px;
+  --font-size-label: 12px;
+  --font-size-caption: 11px;
+
+  --radius-control: var(--radius-control);
+  --radius-poster: var(--radius-poster);
+  --radius-sheet: var(--radius-sheet);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--canvas);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-size: var(--font-size-body);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+/* macOS 原生感：窗口可拖拽区域与红绿灯留白，shadcn 不提供，必须手写。 */
+@layer utilities {
+  .app-drag {
+    -webkit-app-region: drag;
+  }
+
+  .app-no-drag {
+    -webkit-app-region: no-drag;
+  }
+
+  .mac-traffic-inset {
+    padding-left: var(--traffic-light-inset);
+  }
+
+  .sidebar-select-none {
+    user-select: none;
+  }
+}

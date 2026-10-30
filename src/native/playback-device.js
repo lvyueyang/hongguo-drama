@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: MIT
 // ttEncrypt and registration fields adapted from tsukiyo-zero/hongguoTV,
 // commit 388931852ddc614db8b00775a3dc54c5ede6307f,
 // kotlin-tv/core/src/main/kotlin/com/hongguotv/core/DeviceRegister.kt

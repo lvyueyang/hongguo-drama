@@ -1,0 +1,23 @@
+{
+  "name": "@hongguo/sdk",
+  "version": "5.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./dist-types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist-types/index.d.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@hongguo/host": "workspace:*",
+    "@hongguo/shared": "workspace:*",
+    "axios": "1.21.0",
+    "zod": "4.6.7"
+  }
+}

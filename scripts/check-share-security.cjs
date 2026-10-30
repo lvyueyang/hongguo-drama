@@ -142,8 +142,9 @@ async function main() {
       assert.equal(connected.length, 1, 'redirect and rebound DNS must be checked before each connection');
     }
   } finally { axios.get = original; dns.lookup = originalLookup; }
-  assert.equal(require('../package.json').dependencies.axios, '1.20.0');
-  assert.equal(require('axios/package.json').version, '1.20.0');
+  // 5.0 起 axios 属于 SDK 包（依赖收敛到 packages/sdk），版本以 SDK 的声明为准。
+  const sdkAxios = require('../packages/sdk/package.json').dependencies.axios;
+  assert.equal(require('axios/package.json').version, sdkAxios, 'installed axios must match the SDK pin');
   console.log('Share security: input, private destinations, redirects, socket DNS/rebinding, official URL fixtures, gzip limit and dependency checks passed');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

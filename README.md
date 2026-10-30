@@ -4,6 +4,11 @@
 
 <h1 align="center">红果短剧 · 桌面版</h1>
 
+> **5.0 重构进行中（`dev` 分支，尚未发行）**：工程已迁到 pnpm workspace 多包 + TypeScript + React 19 +
+> Tailwind v4 + shadcn 风格组件；主进程的下载/合并/播放链路与部分页面仍在迁移。
+> 进度与阻塞见 [docs/refactor-status.md](docs/refactor-status.md)，执行计划见 [docs/refactor-plan.md](docs/refactor-plan.md)。
+> 下面这段 4.5 下载说明对应 `main` 分支上的正式版。
+
 <p align="center">发现好剧，接着上次看。搜索、播放、下载、追剧与合并导出，在一个桌面应用里完成。</p>
 
 <p align="center">

@@ -1,0 +1,21 @@
+{
+  "name": "@hongguo/shared",
+  "version": "5.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./dist-types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist-types/index.d.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "24.10.1"
+  }
+}

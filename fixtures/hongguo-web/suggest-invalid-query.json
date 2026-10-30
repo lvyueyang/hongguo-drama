@@ -1,0 +1,4 @@
+{
+  "code": "invalid_query",
+  "message": "Provide one non-empty search query of at most 30 characters."
+}

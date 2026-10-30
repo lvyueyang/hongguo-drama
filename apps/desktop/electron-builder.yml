@@ -1,0 +1,54 @@
+# 5.0 打包配置（M5 起点）。产物只包含 electron-vite 的 out/ 与内置 ffmpeg，不再把源码打进 asar。
+appId: io.github.jackotom.hongguo-drama-mac
+productName: 红果短剧
+directories:
+  output: ../../dist-5.0
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+asar: true
+artifactName: hongguo-downloader-5.0-${os}-${arch}.${ext}
+extraResources:
+  - from: ../../build/ffmpeg
+    to: bin
+    filter:
+      - "ffmpeg*"
+      - "ffprobe*"
+      - "*.txt"
+      - "COPYING.*"
+      - "LICENSE.md"
+  - from: ../../LICENSE
+    to: LICENSE.txt
+  - from: ../../NOTICE
+    to: NOTICE.txt
+  - from: ../../THIRD-PARTY-NOTICES.md
+    to: THIRD-PARTY-NOTICES.md
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  requestedExecutionLevel: asInvoker
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: 红果短剧下载器
+mac:
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  category: public.app-category.video
+  minimumSystemVersion: "13.0"
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  notarize: false
+  extraResources:
+    - from: ../../build/app-update.yml
+      to: app-update.yml
+publish:
+  provider: github
+  owner: jackotom
+  repo: hongguo-drama

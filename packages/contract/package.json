@@ -1,0 +1,24 @@
+{
+  "name": "@hongguo/contract",
+  "version": "5.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./dist-types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist-types/index.d.ts",
+      "default": "./src/index.ts"
+    },
+    "./channels": {
+      "types": "./dist-types/channels.d.ts",
+      "default": "./src/channels.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "zod": "4.6.7"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist-types",
+    "tsBuildInfoFile": "dist-types/.tsbuildinfo",
+    "types": ["node"],
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": true,
+    "useUnknownInCatchVariables": false,
+    "allowJs": true
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    {
+      "path": "../host"
+    },
+    {
+      "path": "../shared"
+    }
+  ],
+  "exclude": ["src/**/*.cjs"]
+}

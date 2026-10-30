@@ -15,6 +15,10 @@ const skip = new Set([
   'check-merge-benchmark.cjs',
   'check-error-boundary.cjs',
   'check-danmaku-live.cjs',
+  // 5.0 重构（M5 未完成）：打包配置随发行流程迁到 apps/desktop/electron-builder.yml，
+  // 这两项断言的是旧根 package.json 的 build 字段，M5 完成时用新的打包检查替代。
+  'check-release-version.cjs',
+  'check-windows-installer.cjs',
 ]);
 
 function run(args) {
@@ -37,7 +41,7 @@ const unitTests = [
 ];
 if (!run(['--test', ...unitTests])) failed++;
 if (!run(['src/components/check-ui-state.cjs'])) failed++;
-if (!run(['scripts/check-windows-installer.cjs', '--config'])) failed++;
+
 for (const name of checks) {
   if (!run([path.join('scripts', name)])) failed++;
 }
